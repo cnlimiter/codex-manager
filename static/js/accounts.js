@@ -574,7 +574,7 @@ async function viewAccount(id) {
                     <span class="value">
                         ${account.email_login
                             ? `${escapeHtml(account.email_login)}
-                               <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(account.email_login)}')" title="复制">??</button>`
+                               <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(account.email_login)}')" title="复制">📋</button>`
                             : '-'}
                     </span>
                 </div>
@@ -583,7 +583,7 @@ async function viewAccount(id) {
                     <span class="value">
                         ${account.email_password
                             ? `<code style="font-size: 0.75rem;">${escapeHtml(account.email_password)}</code>
-                               <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(account.email_password)}')" title="复制">??</button>`
+                               <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(account.email_password)}')" title="复制">📋</button>`
                             : '-'}
                     </span>
                 </div>

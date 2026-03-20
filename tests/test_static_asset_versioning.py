@@ -26,3 +26,12 @@ def test_index_template_uses_versioned_static_assets():
     assert '/static/css/style.css?v={{ static_version }}' in template
     assert '/static/js/utils.js?v={{ static_version }}' in template
     assert '/static/js/app.js?v={{ static_version }}' in template
+
+
+def test_accounts_detail_email_copy_buttons_use_copy_icon():
+    script = Path("static/js/accounts.js").read_text(encoding="utf-8")
+
+    assert """<button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(account.email_login)}')" title="复制">📋</button>`""" in script
+    assert """<button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(account.email_password)}')" title="复制">📋</button>`""" in script
+    assert """<button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(account.email_login)}')" title="复制">??</button>`""" not in script
+    assert """<button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(account.email_password)}')" title="复制">??</button>`""" not in script
