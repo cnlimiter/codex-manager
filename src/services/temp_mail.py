@@ -298,25 +298,25 @@ class TempMailService(BaseEmailService):
         start_time = time.time()
         seen_mail_ids: set = set()
 
-        # 优先使用用户级 JWT，回退到 admin API
-        cached = self._email_cache.get(email, {})
-        jwt = cached.get("jwt")
+        # 优先使用用户级 JWT，回退到 admin API 先注释用户级API
+        # cached = self._email_cache.get(email, {})
+        # jwt = cached.get("jwt")
 
         while time.time() - start_time < timeout:
             try:
-                if jwt:
-                    response = self._make_request(
-                        "GET",
-                        "/user_api/mails",
-                        params={"limit": 20, "offset": 0},
-                        headers={"x-user-token": jwt, "Content-Type": "application/json", "Accept": "application/json"},
-                    )
-                else:
-                    response = self._make_request(
-                        "GET",
-                        "/admin/mails",
-                        params={"limit": 20, "offset": 0, "address": email},
-                    )
+                # if jwt:
+                #     response = self._make_request(
+                #         "GET",
+                #         "/user_api/mails",
+                #         params={"limit": 20, "offset": 0},
+                #         headers={"x-user-token": jwt, "Content-Type": "application/json", "Accept": "application/json"},
+                #     )
+                # else:
+                response = self._make_request(
+                    "GET",
+                    "/admin/mails",
+                    params={"limit": 20, "offset": 0, "address": email},
+                )
 
                 # /user_api/mails 和 /admin/mails 返回格式相同: {"results": [...], "total": N}
                 mails = response.get("results", [])
