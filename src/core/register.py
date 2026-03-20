@@ -788,11 +788,14 @@ class RegistrationEngine:
                     result.error_message = "注册密码失败"
                     return result
 
-            # 9. 发送验证码
-            self._log("9. 发送验证码...")
-            if not self._send_verification_code():
-                result.error_message = "发送验证码失败"
-                return result
+            # 9. 发送验证码（Outlook 邮箱跳过，由邮箱本身接收）
+            if self.email_service.service_type.value != "outlook":
+                self._log("9. 发送验证码...")
+                if not self._send_verification_code():
+                    result.error_message = "发送验证码失败"
+                    return result
+            else:
+                self._log("9. Outlook 邮箱，跳过发送验证码环节")
 
             # 10. 获取验证码
             self._log("10. 等待验证码...")
