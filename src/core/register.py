@@ -716,6 +716,26 @@ class RegistrationEngine:
         except Exception as e:
             logger.warning(f"标记邮箱状态失败: {e}")
 
+    def _restart_oauth_session(self) -> bool:
+        """创建全新的 OAuth 会话，避免注册阶段状态污染登录流程。"""
+        try:
+            self.http_client.close()
+        except Exception:
+            pass
+
+        self.http_client = OpenAIHTTPClient(proxy_url=self.proxy_url)
+        self.session = None
+        self.session_token = None
+        self.oauth_start = None
+        self._oauth_context_url = None
+        self._otp_sent_at = None
+
+        if not self._init_session():
+            return False
+        if not self._start_oauth():
+            return False
+        return True
+
     def _send_verification_code(
         self,
         *,
@@ -754,6 +774,43 @@ class RegistrationEngine:
 
         except Exception as e:
             self._log(f"发送验证码失败: {e}", "error")
+            return False
+
+    def _send_passwordless_otp(self) -> bool:
+        """在登录流程里直接触发无密码 OTP 邮件。"""
+        try:
+            self._otp_sent_at = time.time()
+            referer = self._oauth_context_url or (self.oauth_start.auth_url if self.oauth_start else "https://auth.openai.com/log-in")
+            headers = {
+                "referer": referer,
+                "accept": "application/json",
+            }
+
+            csrf_token = self._get_cookie_by_prefix("oai-login-csrf")
+            if csrf_token:
+                headers["x-csrf-token"] = csrf_token
+
+            response = self.session.post(
+                OPENAI_API_ENDPOINTS["passwordless_send_otp"],
+                headers=headers,
+            )
+
+            self._log(f"无密码登录验证码发送状态: {response.status_code}")
+            if response.status_code in [200, 204]:
+                return True
+
+            if response.status_code == 400:
+                self._log(
+                    f"无密码登录验证码发送返回 400，继续等待验证码，响应: {response.text[:200]}",
+                    "warning"
+                )
+                return True
+
+            self._log(f"无密码登录验证码发送失败: {response.text[:200]}", "warning")
+            return False
+
+        except Exception as e:
+            self._log(f"发送无密码登录验证码失败: {e}", "error")
             return False
 
     def _get_verification_code(self) -> Optional[str]:
@@ -1132,100 +1189,93 @@ class RegistrationEngine:
             select_step = 14
             redirect_step = 15
             callback_step = 16
-            direct_callback_url = ""
 
-            if not self._is_existing_account:
-                # 新账号在 create account 后不再直接依赖旧 Cookie，改为进入 OAuth 登录流程再收一遍 OTP。
-                self._log("13. 创建账号后切换到 OAuth 登录流程...")
-                login_sen_token = self._check_sentinel(did)
-                login_result = self._submit_auth_form(did, login_sen_token, screen_hint="login")
+            # 13. 获取 Workspace ID
+            self._log(f"{workspace_step}. 获取 Workspace ID...")
+            workspace_id = self._get_workspace_id()
+
+            if not workspace_id and not self._is_existing_account:
+                self._log("13. 创建账号后的授权 Cookie 未包含 workspace，切换到全新 OAuth 登录流程...", "warning")
+
+                if not self._restart_oauth_session():
+                    result.error_message = "重新初始化 OAuth 登录会话失败"
+                    return result
+
+                self._log("14. 获取 Device ID...")
+                login_did = self._get_device_id()
+                if not login_did:
+                    result.error_message = "获取登录 Device ID 失败"
+                    return result
+
+                self._log("15. 检查 Sentinel 拦截...")
+                login_sen_token = self._check_sentinel(login_did)
+                if login_sen_token:
+                    self._log("登录 Sentinel 检查通过")
+                else:
+                    self._log("登录 Sentinel 检查失败或未启用", "warning")
+
+                self._log("16. 提交认证表单（登录）...")
+                login_result = self._submit_auth_form(login_did, login_sen_token, screen_hint="login")
                 if not login_result.success:
                     result.error_message = f"登录流程初始化失败: {login_result.error_message}"
                     return result
 
-                otp_step_base = 14
+                if login_result.page_type not in [
+                    OPENAI_PAGE_TYPES["LOGIN_PASSWORD"],
+                    OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"],
+                ]:
+                    self._log(
+                        f"登录流程页面类型异常（{login_result.page_type or 'unknown'}），仍尝试无密码验证码流程",
+                        "warning"
+                    )
 
-                if login_result.page_type == OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]:
-                    self._log("14. 提交登录密码...")
-                    login_result = self._submit_login_password(login_result.response_data)
-                    if not login_result.success:
-                        result.error_message = f"提交登录密码失败: {login_result.error_message}"
-                        return result
-                    otp_step_base = 15
+                self._log("17. 发送无密码登录验证码...")
+                if not self._send_passwordless_otp():
+                    result.error_message = "发送无密码登录验证码失败"
+                    return result
 
-                if login_result.page_type == OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]:
-                    self._log(f"{otp_step_base}. 发送登录验证码...")
-                    if not self._send_verification_code(login_flow=True, allow_already_sent=True):
-                        result.error_message = "发送登录验证码失败"
-                        return result
+                self._log("18. 等待登录验证码...")
+                login_code = self._get_verification_code()
+                if not login_code:
+                    result.error_message = "获取登录验证码失败"
+                    return result
 
-                    self._log(f"{otp_step_base + 1}. 等待登录验证码...")
-                    login_code = self._get_verification_code()
-                    if not login_code:
-                        result.error_message = "获取登录验证码失败"
-                        return result
+                self._log("19. 验证登录验证码...")
+                if not self._validate_verification_code(login_code):
+                    result.error_message = "验证登录验证码失败"
+                    return result
 
-                    self._log(f"{otp_step_base + 2}. 验证登录验证码...")
-                    if not self._validate_verification_code(login_code):
-                        result.error_message = "验证登录验证码失败"
-                        return result
-
-                    workspace_step = otp_step_base + 3
-                    select_step = otp_step_base + 4
-                    redirect_step = otp_step_base + 5
-                    callback_step = otp_step_base + 6
-                else:
-                    callback_from_login = str((login_result.response_data or {}).get("callback_url") or "").strip()
-                    if callback_from_login:
-                        self._log(f"登录流程已直接拿到回调 URL: {callback_from_login[:120]}...")
-                        direct_callback_url = callback_from_login
-                        callback_step = otp_step_base
-                    else:
-                        final_url = str(login_result.final_url or "").strip()
-                        if "code=" in final_url and "state=" in final_url:
-                            direct_callback_url = final_url
-                            callback_step = otp_step_base
-                        else:
-                            self._log(
-                                f"登录流程未进入 OTP 页面（{login_result.page_type or 'unknown'}），尝试恢复 OAuth 授权上下文",
-                                "warning"
-                            )
-                            direct_callback_url = self._resume_oauth_authorization() or ""
-                            if direct_callback_url:
-                                callback_step = otp_step_base + 1
-                            else:
-                                self._log("OAuth 恢复后仍未直接拿到回调，继续尝试读取 Workspace", "warning")
-                                workspace_step = otp_step_base + 1
-                                select_step = otp_step_base + 2
-                                redirect_step = otp_step_base + 3
-                                callback_step = otp_step_base + 4
-
-            callback_url = direct_callback_url
-            if not callback_url:
-                # 13/17. 获取 Workspace ID
-                self._log(f"{workspace_step}. 获取 Workspace ID...")
+                self._log("20. 重新获取 Workspace ID...")
                 workspace_id = self._get_workspace_id()
                 if not workspace_id:
                     result.error_message = "获取 Workspace ID 失败"
                     return result
 
-                result.workspace_id = workspace_id
+                select_step = 21
+                redirect_step = 22
+                callback_step = 23
 
-                # 14/18. 选择 Workspace
-                self._log(f"{select_step}. 选择 Workspace...")
-                continue_url = self._select_workspace(workspace_id)
-                if not continue_url:
-                    result.error_message = "选择 Workspace 失败"
-                    return result
+            if not workspace_id:
+                result.error_message = "获取 Workspace ID 失败"
+                return result
 
-                # 15/19. 跟随重定向链
-                self._log(f"{redirect_step}. 跟随重定向链...")
-                callback_url = self._follow_redirects(continue_url)
-                if not callback_url:
-                    result.error_message = "跟随重定向链失败"
-                    return result
+            result.workspace_id = workspace_id
 
-            # 16/20. 处理 OAuth 回调
+            # 14/21. 选择 Workspace
+            self._log(f"{select_step}. 选择 Workspace...")
+            continue_url = self._select_workspace(workspace_id)
+            if not continue_url:
+                result.error_message = "选择 Workspace 失败"
+                return result
+
+            # 15/22. 跟随重定向链
+            self._log(f"{redirect_step}. 跟随重定向链...")
+            callback_url = self._follow_redirects(continue_url)
+            if not callback_url:
+                result.error_message = "跟随重定向链失败"
+                return result
+
+            # 16/23. 处理 OAuth 回调
             self._log(f"{callback_step}. 处理 OAuth 回调...")
             token_info = self._handle_oauth_callback(callback_url)
             if not token_info:
