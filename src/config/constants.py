@@ -64,7 +64,6 @@ OPENAI_API_ENDPOINTS = {
     "sentinel": "https://sentinel.openai.com/backend-api/sentinel/req",
     "signup": "https://auth.openai.com/api/accounts/authorize/continue",
     "register": "https://auth.openai.com/api/accounts/user/register",
-    "login_password": "https://auth0.openai.com/u/login/password",
     "passwordless_send_otp": "https://auth.openai.com/api/accounts/passwordless/send-otp",
     "send_otp": "https://auth.openai.com/api/accounts/email-otp/send",
     "validate_otp": "https://auth.openai.com/api/accounts/email-otp/validate",
@@ -76,7 +75,7 @@ OPENAI_API_ENDPOINTS = {
 OPENAI_PAGE_TYPES = {
     "EMAIL_OTP_VERIFICATION": "email_otp_verification",  # 已注册账号，需要 OTP 验证
     "PASSWORD_REGISTRATION": "password",  # 新账号，需要设置密码
-    "LOGIN_PASSWORD": "login_password",  # 登录流程要求先提交密码
+    "LOGIN_PASSWORD": "login_password",  # 登录流程会先落到该页面，再改走 passwordless OTP
 }
 
 # ============================================================================
