@@ -81,6 +81,7 @@ class SignupFormResult:
     page_type: str = ""  # 响应中的 page.type 字段
     is_existing_account: bool = False  # 是否为已注册账号
     response_data: Dict[str, Any] = None  # 完整的响应数据
+    final_url: str = ""  # 最终落地 URL
     error_message: str = ""
 
 
@@ -130,6 +131,7 @@ class RegistrationEngine:
         self.password: Optional[str] = None  # 注册密码
         self.email_info: Optional[Dict[str, Any]] = None
         self.oauth_start: Optional[OAuthStart] = None
+        self._oauth_context_url: Optional[str] = None
         self.session: Optional[cffi_requests.Session] = None
         self.session_token: Optional[str] = None  # 会话令牌
         self.logs: list = []
@@ -213,6 +215,7 @@ class RegistrationEngine:
         try:
             self._log("开始 OAuth 授权流程...")
             self.oauth_start = self.oauth_manager.start_oauth()
+            self._oauth_context_url = self.oauth_start.auth_url
             self._log(f"OAuth URL 已生成: {self.oauth_start.auth_url[:80]}...")
             return True
         except Exception as e:
@@ -355,13 +358,17 @@ class RegistrationEngine:
                     success=True,
                     page_type=page_type,
                     is_existing_account=is_existing,
-                    response_data=response_data
+                    response_data=response_data,
+                    final_url=str(getattr(response, "url", "") or ""),
                 )
 
             except Exception as parse_error:
                 self._log(f"解析响应失败: {parse_error}", "warning")
                 # 无法解析，默认成功
-                return SignupFormResult(success=True)
+                return SignupFormResult(
+                    success=True,
+                    final_url=str(getattr(response, "url", "") or ""),
+                )
 
         except Exception as e:
             self._log(f"提交认证表单失败({screen_hint}): {e}", "error")
@@ -474,9 +481,33 @@ class RegistrationEngine:
                 page_type=page_type,
                 is_existing_account=page_type == OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"],
                 response_data=next_response_data,
+                final_url=str(getattr(response, "url", "") or ""),
             )
 
         return SignupFormResult(success=False, error_message=last_error)
+
+    def _resume_oauth_authorization(self) -> Optional[str]:
+        """登录成功后重新进入 OAuth 授权地址，尝试恢复回调链。"""
+        if not self.oauth_start:
+            self._log("OAuth 流程未初始化，无法恢复授权上下文", "error")
+            return None
+
+        try:
+            response = self.session.get(
+                self.oauth_start.auth_url,
+                allow_redirects=True,
+                timeout=20,
+            )
+            final_url = str(getattr(response, "url", "") or "").strip()
+            if final_url:
+                self._oauth_context_url = final_url
+                self._log(f"OAuth 恢复后的最终 URL: {final_url[:200]}")
+                if "code=" in final_url and "state=" in final_url:
+                    return final_url
+            return None
+        except Exception as e:
+            self._log(f"恢复 OAuth 授权上下文失败: {e}", "warning")
+            return None
 
     def _register_password(self) -> Tuple[bool, Optional[str]]:
         """注册密码"""
@@ -723,7 +754,7 @@ class RegistrationEngine:
             response = self.session.post(
                 endpoint,
                 headers={
-                    "referer": "https://auth.openai.com/sign-in-with-chatgpt/codex/consent",
+                    "referer": self._oauth_context_url or "https://auth.openai.com/sign-in-with-chatgpt/codex/consent",
                     "content-type": "application/json",
                 },
                 data=select_body,
@@ -969,6 +1000,7 @@ class RegistrationEngine:
             select_step = 14
             redirect_step = 15
             callback_step = 16
+            direct_callback_url = ""
 
             if not self._is_existing_account:
                 # 新账号在 create account 后不再直接依赖旧 Cookie，改为进入 OAuth 登录流程再收一遍 OTP。
@@ -1011,37 +1043,49 @@ class RegistrationEngine:
                     redirect_step = otp_step_base + 5
                     callback_step = otp_step_base + 6
                 else:
-                    self._log(
-                        f"登录流程未进入 OTP 页面（{login_result.page_type or 'unknown'}），直接尝试读取 Workspace",
-                        "warning"
-                    )
-                    workspace_step = otp_step_base
-                    select_step = otp_step_base + 1
-                    redirect_step = otp_step_base + 2
-                    callback_step = otp_step_base + 3
+                    final_url = str(login_result.final_url or "").strip()
+                    if "code=" in final_url and "state=" in final_url:
+                        direct_callback_url = final_url
+                        callback_step = otp_step_base
+                    else:
+                        self._log(
+                            f"登录流程未进入 OTP 页面（{login_result.page_type or 'unknown'}），尝试恢复 OAuth 授权上下文",
+                            "warning"
+                        )
+                        direct_callback_url = self._resume_oauth_authorization() or ""
+                        if direct_callback_url:
+                            callback_step = otp_step_base + 1
+                        else:
+                            self._log("OAuth 恢复后仍未直接拿到回调，继续尝试读取 Workspace", "warning")
+                            workspace_step = otp_step_base + 1
+                            select_step = otp_step_base + 2
+                            redirect_step = otp_step_base + 3
+                            callback_step = otp_step_base + 4
 
-            # 13/17. 获取 Workspace ID
-            self._log(f"{workspace_step}. 获取 Workspace ID...")
-            workspace_id = self._get_workspace_id()
-            if not workspace_id:
-                result.error_message = "获取 Workspace ID 失败"
-                return result
-
-            result.workspace_id = workspace_id
-
-            # 14/18. 选择 Workspace
-            self._log(f"{select_step}. 选择 Workspace...")
-            continue_url = self._select_workspace(workspace_id)
-            if not continue_url:
-                result.error_message = "选择 Workspace 失败"
-                return result
-
-            # 15/19. 跟随重定向链
-            self._log(f"{redirect_step}. 跟随重定向链...")
-            callback_url = self._follow_redirects(continue_url)
+            callback_url = direct_callback_url
             if not callback_url:
-                result.error_message = "跟随重定向链失败"
-                return result
+                # 13/17. 获取 Workspace ID
+                self._log(f"{workspace_step}. 获取 Workspace ID...")
+                workspace_id = self._get_workspace_id()
+                if not workspace_id:
+                    result.error_message = "获取 Workspace ID 失败"
+                    return result
+
+                result.workspace_id = workspace_id
+
+                # 14/18. 选择 Workspace
+                self._log(f"{select_step}. 选择 Workspace...")
+                continue_url = self._select_workspace(workspace_id)
+                if not continue_url:
+                    result.error_message = "选择 Workspace 失败"
+                    return result
+
+                # 15/19. 跟随重定向链
+                self._log(f"{redirect_step}. 跟随重定向链...")
+                callback_url = self._follow_redirects(continue_url)
+                if not callback_url:
+                    result.error_message = "跟随重定向链失败"
+                    return result
 
             # 16/20. 处理 OAuth 回调
             self._log(f"{callback_step}. 处理 OAuth 回调...")
