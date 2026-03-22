@@ -9,6 +9,7 @@ import time
 import logging
 import secrets
 import string
+import urllib.parse
 from typing import Optional, Dict, Any, Tuple, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -370,6 +371,100 @@ class RegistrationEngine:
         """兼容旧调用，内部统一走认证表单入口。"""
         return self._submit_auth_form(did, sen_token, screen_hint="signup")
 
+    def _get_cookie_by_prefix(self, prefix: str) -> Optional[str]:
+        """按前缀获取 Cookie 值。"""
+        if not self.session or not getattr(self.session, "cookies", None):
+            return None
+
+        try:
+            for key, value in self.session.cookies.items():
+                if str(key).startswith(prefix):
+                    return str(value)
+        except Exception:
+            return None
+
+        return None
+
+    def _submit_login_password(self, response_data: Optional[Dict[str, Any]] = None) -> SignupFormResult:
+        """提交登录密码，处理 login_password 页面。"""
+        if not self.password:
+            return SignupFormResult(success=False, error_message="登录流程缺少密码")
+
+        page = (response_data or {}).get("page") or {}
+        endpoint_candidates = []
+
+        for key in ("action", "submit_url", "submit_path", "path", "url"):
+            value = str(page.get(key) or "").strip()
+            if value and "password" in value:
+                endpoint_candidates.append(urllib.parse.urljoin("https://auth.openai.com", value))
+
+        endpoint_candidates.append(OPENAI_API_ENDPOINTS["login_password"])
+
+        tried = set()
+        payload = json.dumps({
+            "username": self.email,
+            "password": self.password,
+        })
+
+        headers = {
+            "referer": self.oauth_start.auth_url if self.oauth_start else "https://auth.openai.com/",
+            "accept": "application/json",
+            "content-type": "application/json",
+        }
+
+        csrf_token = self._get_cookie_by_prefix("oai-login-csrf")
+        if csrf_token:
+            headers["x-csrf-token"] = csrf_token
+
+        last_error = "未找到可用的登录密码提交端点"
+
+        for endpoint in endpoint_candidates:
+            endpoint = str(endpoint or "").strip()
+            if not endpoint or endpoint in tried:
+                continue
+            tried.add(endpoint)
+
+            try:
+                response = self.session.post(
+                    endpoint,
+                    headers=headers,
+                    data=payload,
+                )
+            except Exception as e:
+                last_error = str(e)
+                self._log(f"提交登录密码失败: {e}", "warning")
+                continue
+
+            self._log(f"提交登录密码状态: {response.status_code} ({endpoint})")
+
+            if response.status_code == 404:
+                last_error = f"HTTP 404: {endpoint}"
+                continue
+
+            if response.status_code != 200:
+                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                self._log(f"提交登录密码失败: {response.text[:200]}", "warning")
+                return SignupFormResult(success=False, error_message=last_error)
+
+            try:
+                next_response_data = response.json()
+            except Exception as parse_error:
+                last_error = f"解析登录密码响应失败: {parse_error}"
+                self._log(last_error, "warning")
+                return SignupFormResult(success=False, error_message=last_error)
+
+            page_type = str((next_response_data.get("page") or {}).get("type") or "").strip()
+            self._log(f"登录密码后的页面类型: {page_type or 'unknown'}")
+
+            return SignupFormResult(
+                success=True,
+                page_type=page_type,
+                is_existing_account=page_type == OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"],
+                response_data=next_response_data,
+            )
+
+        return SignupFormResult(success=False, error_message=last_error)
+
     def _register_password(self) -> Tuple[bool, Optional[str]]:
         """注册密码"""
         try:
@@ -445,22 +540,41 @@ class RegistrationEngine:
         except Exception as e:
             logger.warning(f"标记邮箱状态失败: {e}")
 
-    def _send_verification_code(self) -> bool:
+    def _send_verification_code(
+        self,
+        *,
+        login_flow: bool = False,
+        allow_already_sent: bool = False
+    ) -> bool:
         """发送验证码"""
         try:
             # 记录发送时间戳
             self._otp_sent_at = time.time()
 
+            referer = "https://auth.openai.com/create-account/password"
+            if login_flow and self.oauth_start:
+                referer = self.oauth_start.auth_url
+
             response = self.session.get(
                 OPENAI_API_ENDPOINTS["send_otp"],
                 headers={
-                    "referer": "https://auth.openai.com/create-account/password",
+                    "referer": referer,
                     "accept": "application/json",
                 },
             )
 
             self._log(f"验证码发送状态: {response.status_code}")
-            return response.status_code == 200
+            if response.status_code == 200:
+                return True
+
+            if allow_already_sent and response.status_code == 400:
+                self._log(
+                    f"验证码发送返回 400，继续等待验证码，响应: {response.text[:200]}",
+                    "warning"
+                )
+                return True
+
+            return False
 
         except Exception as e:
             self._log(f"发送验证码失败: {e}", "error")
@@ -817,26 +931,46 @@ class RegistrationEngine:
                     result.error_message = f"登录流程初始化失败: {login_result.error_message}"
                     return result
 
-                self._log("14. 发送登录验证码...")
-                if not self._send_verification_code():
-                    result.error_message = "发送登录验证码失败"
-                    return result
+                otp_step_base = 14
 
-                self._log("15. 等待登录验证码...")
-                login_code = self._get_verification_code()
-                if not login_code:
-                    result.error_message = "获取登录验证码失败"
-                    return result
+                if login_result.page_type == OPENAI_PAGE_TYPES["LOGIN_PASSWORD"]:
+                    self._log("14. 提交登录密码...")
+                    login_result = self._submit_login_password(login_result.response_data)
+                    if not login_result.success:
+                        result.error_message = f"提交登录密码失败: {login_result.error_message}"
+                        return result
+                    otp_step_base = 15
 
-                self._log("16. 验证登录验证码...")
-                if not self._validate_verification_code(login_code):
-                    result.error_message = "验证登录验证码失败"
-                    return result
+                if login_result.page_type == OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]:
+                    self._log(f"{otp_step_base}. 发送登录验证码...")
+                    if not self._send_verification_code(login_flow=True, allow_already_sent=True):
+                        result.error_message = "发送登录验证码失败"
+                        return result
 
-                workspace_step = 17
-                select_step = 18
-                redirect_step = 19
-                callback_step = 20
+                    self._log(f"{otp_step_base + 1}. 等待登录验证码...")
+                    login_code = self._get_verification_code()
+                    if not login_code:
+                        result.error_message = "获取登录验证码失败"
+                        return result
+
+                    self._log(f"{otp_step_base + 2}. 验证登录验证码...")
+                    if not self._validate_verification_code(login_code):
+                        result.error_message = "验证登录验证码失败"
+                        return result
+
+                    workspace_step = otp_step_base + 3
+                    select_step = otp_step_base + 4
+                    redirect_step = otp_step_base + 5
+                    callback_step = otp_step_base + 6
+                else:
+                    self._log(
+                        f"登录流程未进入 OTP 页面（{login_result.page_type or 'unknown'}），直接尝试读取 Workspace",
+                        "warning"
+                    )
+                    workspace_step = otp_step_base
+                    select_step = otp_step_base + 1
+                    redirect_step = otp_step_base + 2
+                    callback_step = otp_step_base + 3
 
             # 13/17. 获取 Workspace ID
             self._log(f"{workspace_step}. 获取 Workspace ID...")
