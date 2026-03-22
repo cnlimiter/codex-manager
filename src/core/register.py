@@ -391,6 +391,13 @@ class RegistrationEngine:
             return SignupFormResult(success=False, error_message="登录流程缺少密码")
 
         page = (response_data or {}).get("page") or {}
+        if page:
+            self._log(f"login_password 页面字段: {','.join(sorted(page.keys()))}")
+
+        auth_state = str(page.get("state") or (self.oauth_start.state if self.oauth_start else "")).strip()
+        if not auth_state:
+            return SignupFormResult(success=False, error_message="无法解析登录 state")
+
         endpoint_candidates = []
 
         for key in ("action", "submit_url", "submit_path", "path", "url"):
@@ -398,18 +405,13 @@ class RegistrationEngine:
             if value and "password" in value:
                 endpoint_candidates.append(urllib.parse.urljoin("https://auth.openai.com", value))
 
-        endpoint_candidates.append(OPENAI_API_ENDPOINTS["login_password"])
+        endpoint_candidates.append(f'{OPENAI_API_ENDPOINTS["login_password"]}?state={urllib.parse.quote(auth_state, safe="")}')
 
         tried = set()
-        payload = json.dumps({
-            "username": self.email,
-            "password": self.password,
-        })
-
         headers = {
             "referer": self.oauth_start.auth_url if self.oauth_start else "https://auth.openai.com/",
-            "accept": "application/json",
-            "content-type": "application/json",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "content-type": "application/x-www-form-urlencoded",
         }
 
         csrf_token = self._get_cookie_by_prefix("oai-login-csrf")
@@ -425,10 +427,19 @@ class RegistrationEngine:
             tried.add(endpoint)
 
             try:
+                self.session.get(endpoint, headers={"referer": headers["referer"]}, timeout=15)
+
+                payload = {
+                    "state": auth_state,
+                    "username": self.email,
+                    "password": self.password,
+                    "action": "default",
+                }
                 response = self.session.post(
                     endpoint,
                     headers=headers,
                     data=payload,
+                    allow_redirects=True,
                 )
             except Exception as e:
                 last_error = str(e)
@@ -446,15 +457,17 @@ class RegistrationEngine:
                 self._log(f"提交登录密码失败: {response.text[:200]}", "warning")
                 return SignupFormResult(success=False, error_message=last_error)
 
+            next_response_data = None
+            page_type = ""
             try:
                 next_response_data = response.json()
-            except Exception as parse_error:
-                last_error = f"解析登录密码响应失败: {parse_error}"
-                self._log(last_error, "warning")
-                return SignupFormResult(success=False, error_message=last_error)
+                page_type = str((next_response_data.get("page") or {}).get("type") or "").strip()
+            except Exception:
+                page_type = ""
 
-            page_type = str((next_response_data.get("page") or {}).get("type") or "").strip()
             self._log(f"登录密码后的页面类型: {page_type or 'unknown'}")
+            if getattr(response, "url", ""):
+                self._log(f"登录密码后的最终 URL: {str(response.url)[:200]}")
 
             return SignupFormResult(
                 success=True,
