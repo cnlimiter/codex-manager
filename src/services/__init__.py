@@ -38,7 +38,9 @@ from .outlook.base import (
 from .outlook.account import OutlookAccount
 from .outlook.providers import (
     OutlookProvider,
+    IMAPOldProvider,
     IMAPNewProvider,
+    GraphAPIProvider,
 )
 
 __all__ = [
@@ -65,5 +67,7 @@ __all__ = [
     'ProviderStatus',
     'OutlookAccount',
     'OutlookProvider',
+    'IMAPOldProvider',
     'IMAPNewProvider',
+    'GraphAPIProvider',
 ]

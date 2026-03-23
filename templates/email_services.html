@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>邮箱服务 - OpenAI 注册系统</title>
     <link rel="stylesheet" href="/static/css/style.css?v={{ static_version }}">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📧</text></svg>">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ static_version }}">
 </head>
 <body>
     <div class="container">
@@ -62,13 +62,16 @@
                 </div>
                 <div class="card-body" id="outlook-import-body" style="display: none;">
                     <div class="import-info">
-                        <p><strong>格式（每行一个账户）：</strong></p>
-                        <p><code>邮箱----密码----client_id----refresh_token</code></p>
-                        <p>使用四个连字符（----）分隔字段，以 # 开头的行将被忽略。</p>
+                        <p><strong>支持格式：</strong></p>
+                        <ul>
+                            <li><code>邮箱----密码</code> （密码认证）</li>
+                            <li><code>邮箱----密码----client_id----refresh_token</code> （XOAUTH2 认证，推荐）</li>
+                        </ul>
+                        <p>每行一个账户，使用四个连字符（----）分隔字段。以 # 开头的行将被忽略。</p>
                     </div>
                     <div class="form-group">
                         <label for="outlook-import-data">批量导入数据</label>
-                        <textarea id="outlook-import-data" rows="8" placeholder="example@outlook.com----password123----client_id----refresh_token"></textarea>
+                        <textarea id="outlook-import-data" rows="8" placeholder="example@outlook.com----password123&#10;test@outlook.com----password456----client_id----refresh_token"></textarea>
                     </div>
                     <div class="form-row">
                         <div class="form-group">
@@ -512,55 +515,6 @@
         </div>
     </div>
 
-
-<!-- 收件箱模态框 -->
-<div class="modal" id="inbox-modal">
-    <div class="modal-content" style="max-width:800px;width:95%;">
-        <div class="modal-header">
-            <h3>📬 收件箱 — <span id="inbox-modal-email"></span></h3>
-            <div style="display:flex;gap:8px;align-items:center;">
-                <label style="display:flex;align-items:center;gap:4px;font-size:13px;">
-                    <input type="checkbox" id="inbox-only-unseen"> 仅未读
-                </label>
-                <button class="btn btn-secondary btn-sm" id="inbox-refresh-btn">刷新</button>
-                <button class="modal-close" id="close-inbox-modal">&times;</button>
-            </div>
-        </div>
-        <div class="modal-body" style="padding:0;max-height:70vh;overflow-y:auto;">
-            <div id="inbox-loading" style="padding:32px;text-align:center;">加载中...</div>
-            <table class="data-table" id="inbox-table" style="display:none;">
-                <thead>
-                    <tr>
-                        <th style="width:36px;"></th>
-                        <th>主题</th>
-                        <th style="width:200px;">发件人</th>
-                        <th style="width:150px;">时间</th>
-                    </tr>
-                </thead>
-                <tbody id="inbox-tbody"></tbody>
-            </table>
-            <div id="inbox-empty" style="display:none;padding:32px;text-align:center;color:var(--text-muted);">暂无邮件</div>
-        </div>
-    </div>
-</div>
-
-<!-- 邮件正文模态框 -->
-<div class="modal" id="email-detail-modal">
-    <div class="modal-content" style="max-width:700px;width:95%;">
-        <div class="modal-header">
-            <div>
-                <h3 id="email-detail-subject" style="margin:0;"></h3>
-                <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">
-                    <span id="email-detail-sender"></span> · <span id="email-detail-date"></span>
-                </div>
-            </div>
-            <button class="modal-close" id="close-email-detail-modal">&times;</button>
-        </div>
-        <div class="modal-body" style="max-height:65vh;overflow-y:auto;">
-            <div id="email-detail-body" style="white-space:pre-wrap;word-break:break-word;font-size:13px;"></div>
-        </div>
-    </div>
-</div>
 
 <script src="/static/js/utils.js?v={{ static_version }}"></script>
     <script src="/static/js/email_services.js?v={{ static_version }}"></script>

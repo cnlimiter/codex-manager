@@ -282,13 +282,13 @@ class OpenAIHTTPClient(HTTPClient):
             loc = loc_match.group(1) if loc_match else None
 
             # 检查是否支持
-            if loc in ["CN", "HK", "MO"]:
+            if loc in ["CN", "HK", "MO", "TW"]:
                 return False, loc
             return True, loc
 
         except Exception as e:
             logger.error(f"检查 IP 地理位置失败: {e}")
-            return False, str(e)
+            return False, None
 
     def send_openai_request(
         self,

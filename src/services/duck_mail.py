@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from html import unescape
 from typing import Any, Dict, List, Optional
 
-from .base import BaseEmailService, EmailServiceError, EmailServiceType
+from .base import BaseEmailService, EmailServiceError, EmailServiceType, RateLimitedEmailServiceError
 from ..config.constants import OTP_CODE_PATTERN
 from ..core.http_client import HTTPClient, RequestConfig
 
@@ -102,7 +102,19 @@ class DuckMailService(BaseEmailService):
                     error_message = f"{error_message} - {error_payload}"
                 except Exception:
                     error_message = f"{error_message} - {response.text[:200]}"
-                raise EmailServiceError(error_message)
+                retry_after = None
+                if response.status_code == 429:
+                    retry_after_header = response.headers.get("Retry-After")
+                    if retry_after_header:
+                        try:
+                            retry_after = max(1, int(retry_after_header))
+                        except ValueError:
+                            retry_after = None
+                    error = RateLimitedEmailServiceError(error_message, retry_after=retry_after)
+                else:
+                    error = EmailServiceError(error_message)
+                self.update_status(False, error)
+                raise error
 
             try:
                 return response.json()

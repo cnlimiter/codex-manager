@@ -15,9 +15,11 @@ from fastapi import FastAPI, Request, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from ..config.settings import get_settings
+from ..database import crud
+from ..database.session import get_db
 from .routes import api_router
 from .routes.websocket import router as ws_router
 from .task_manager import task_manager
@@ -108,9 +110,9 @@ def create_app() -> FastAPI:
     async def login_page(request: Request, next: Optional[str] = "/"):
         """登录页面"""
         return templates.TemplateResponse(
-            request,
-            "login.html",
-            {"error": "", "next": next or "/"}
+            request=request,
+            name="login.html",
+            context={"request": request, "error": "", "next": next or "/"}
         )
 
     @app.post("/login")
@@ -119,9 +121,9 @@ def create_app() -> FastAPI:
         expected = get_settings().webui_access_password.get_secret_value()
         if not secrets.compare_digest(password, expected):
             return templates.TemplateResponse(
-                request,
-                "login.html",
-                {"error": "密码错误", "next": next or "/"},
+                request=request,
+                name="login.html",
+                context={"request": request, "error": "密码错误", "next": next or "/"},
                 status_code=401
             )
 
@@ -136,38 +138,48 @@ def create_app() -> FastAPI:
         response.delete_cookie("webui_auth")
         return response
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon_ico():
+        """兼容浏览器对根路径 favicon 的默认请求。"""
+        return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
+    @app.get("/favicon.svg", include_in_schema=False)
+    async def favicon_svg():
+        """提供统一的站点图标资源。"""
+        return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         """首页 - 注册页面"""
         if not _is_authenticated(request):
             return _redirect_to_login(request)
-        return templates.TemplateResponse(request, "index.html")
+        return templates.TemplateResponse(request=request, name="index.html", context={"request": request})
 
     @app.get("/accounts", response_class=HTMLResponse)
     async def accounts_page(request: Request):
         """账号管理页面"""
         if not _is_authenticated(request):
             return _redirect_to_login(request)
-        return templates.TemplateResponse(request, "accounts.html")
+        return templates.TemplateResponse(request=request, name="accounts.html", context={"request": request})
 
     @app.get("/email-services", response_class=HTMLResponse)
     async def email_services_page(request: Request):
         """邮箱服务管理页面"""
         if not _is_authenticated(request):
             return _redirect_to_login(request)
-        return templates.TemplateResponse(request, "email_services.html")
+        return templates.TemplateResponse(request=request, name="email_services.html", context={"request": request})
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
         """设置页面"""
         if not _is_authenticated(request):
             return _redirect_to_login(request)
-        return templates.TemplateResponse(request, "settings.html")
+        return templates.TemplateResponse(request=request, name="settings.html", context={"request": request})
 
     @app.get("/payment", response_class=HTMLResponse)
     async def payment_page(request: Request):
         """支付页面"""
-        return templates.TemplateResponse(request, "payment.html")
+        return templates.TemplateResponse(request=request, name="payment.html", context={"request": request})
 
     @app.on_event("startup")
     async def startup_event():
@@ -184,6 +196,12 @@ def create_app() -> FastAPI:
         # 设置 TaskManager 的事件循环
         loop = asyncio.get_event_loop()
         task_manager.set_loop(loop)
+
+        stale_error = "服务启动时检测到未完成的历史任务，已标记失败，请重新发起。"
+        with get_db() as db:
+            stale_tasks = crud.fail_incomplete_registration_tasks(db, stale_error)
+        if stale_tasks:
+            logger.warning("已收敛 %s 个僵尸任务: %s", len(stale_tasks), ", ".join(task[:8] for task in stale_tasks))
 
         logger.info("=" * 50)
         logger.info(f"{settings.app_name} v{settings.app_version} 启动中...")

@@ -1,6 +1,6 @@
 """
-Outlook 邮箱服务主类（简化版）
-单一 IMAP_NEW Provider + 邮件缓存 + IMAP IDLE 支持
+Outlook 邮箱服务主类
+支持多种 IMAP/API 连接方式，自动故障切换
 """
 
 import logging
@@ -8,24 +8,34 @@ import threading
 import time
 from typing import Optional, Dict, Any, List
 
-from ..base import BaseEmailService, EmailServiceError, EmailServiceType
+from ..base import BaseEmailService, EmailServiceError, EmailServiceStatus, EmailServiceType
 from ...config.constants import EmailServiceType as ServiceType
 from ...config.settings import get_settings
 from .account import OutlookAccount
-from .base import EmailMessage
-from .email_parser import get_email_parser
-from .health_checker import HealthChecker
-from .providers.base import ProviderConfig
+from .base import ProviderType, EmailMessage
+from .email_parser import EmailParser, get_email_parser
+from .health_checker import HealthChecker, FailoverManager
+from .providers.base import OutlookProvider, ProviderConfig
+from .providers.imap_old import IMAPOldProvider
 from .providers.imap_new import IMAPNewProvider
+from .providers.graph_api import GraphAPIProvider
 
 
 logger = logging.getLogger(__name__)
 
-# 验证码搜索的文件夹列表（同时搜索收件箱和垃圾箱）
-_OUTLOOK_SEARCH_FOLDERS = ["INBOX", "Junk Email"]
+
+# 默认提供者优先级
+# IMAP_OLD 最兼容（只需 login.live.com token），IMAP_NEW 次之，Graph API 最后
+# 原因：部分 client_id 没有 Graph API 权限，但有 IMAP 权限
+DEFAULT_PROVIDER_PRIORITY = [
+    ProviderType.IMAP_OLD,
+    ProviderType.IMAP_NEW,
+    ProviderType.GRAPH_API,
+]
 
 
-def _get_code_settings() -> dict:
+def get_email_code_settings() -> dict:
+    """获取验证码等待配置"""
     settings = get_settings()
     return {
         "timeout": settings.email_code_timeout,
@@ -33,58 +43,56 @@ def _get_code_settings() -> dict:
     }
 
 
-class _EmailCache:
-    """轻量级邮件内存缓存（TTL=60s，减少重复 IMAP 请求）"""
-
-    TTL = 60
-
-    def __init__(self):
-        self._cache: Dict[str, tuple] = {}  # email -> (timestamp, List[EmailMessage])
-        self._lock = threading.Lock()
-
-    def get(self, email: str) -> Optional[List[EmailMessage]]:
-        with self._lock:
-            entry = self._cache.get(email)
-            if entry and time.time() - entry[0] < self.TTL:
-                return entry[1]
-        return None
-
-    def set(self, email: str, messages: List[EmailMessage]):
-        with self._lock:
-            self._cache[email] = (time.time(), messages)
-
-    def invalidate(self, email: str):
-        with self._lock:
-            self._cache.pop(email, None)
-
-
 class OutlookService(BaseEmailService):
     """
     Outlook 邮箱服务
-    使用单一 IMAP_NEW Provider，支持连接池复用和 IMAP IDLE
+    支持多种 IMAP/API 连接方式，自动故障切换
     """
 
     def __init__(self, config: Dict[str, Any] = None, name: str = None):
+        """
+        初始化 Outlook 服务
+
+        Args:
+            config: 配置字典，支持以下键:
+                - accounts: Outlook 账户列表
+                - provider_priority: 提供者优先级列表
+                - health_failure_threshold: 连续失败次数阈值
+                - health_disable_duration: 禁用时长（秒）
+                - timeout: 请求超时时间
+                - proxy_url: 代理 URL
+            name: 服务名称
+        """
         super().__init__(ServiceType.OUTLOOK, name)
 
+        # 默认配置
         default_config = {
             "accounts": [],
+            "provider_priority": [p.value for p in DEFAULT_PROVIDER_PRIORITY],
             "health_failure_threshold": 5,
             "health_disable_duration": 60,
             "timeout": 30,
             "proxy_url": None,
         }
+
         self.config = {**default_config, **(config or {})}
 
+        # 解析提供者优先级
+        self.provider_priority = [
+            ProviderType(p) for p in self.config.get("provider_priority", [])
+        ]
+        if not self.provider_priority:
+            self.provider_priority = DEFAULT_PROVIDER_PRIORITY
+
+        # 提供者配置
         self.provider_config = ProviderConfig(
             timeout=self.config.get("timeout", 30),
             proxy_url=self.config.get("proxy_url"),
-            service_id=self.config.get("service_id"),
             health_failure_threshold=self.config.get("health_failure_threshold", 3),
             health_disable_duration=self.config.get("health_disable_duration", 300),
         )
 
-        # 获取默认 client_id
+        # 获取默认 client_id（供无 client_id 的账户使用）
         try:
             _default_client_id = get_settings().outlook_default_client_id
         except Exception:
@@ -95,120 +103,193 @@ class OutlookService(BaseEmailService):
         self._current_account_index = 0
         self._account_lock = threading.Lock()
 
+        # 支持两种配置格式
         if "email" in self.config and "password" in self.config:
             account = OutlookAccount.from_config(self.config)
             if not account.client_id and _default_client_id:
                 account.client_id = _default_client_id
             if account.validate():
-                if not account.has_oauth():
-                    logger.warning(
-                        f"[{account.email}] 跳过：IMAP_NEW 仅支持 OAuth2，"
-                        f"请配置 client_id 和 refresh_token"
-                    )
-                else:
-                    self.accounts.append(account)
+                self.accounts.append(account)
         else:
-            for ac in self.config.get("accounts", []):
-                account = OutlookAccount.from_config(ac)
+            for account_config in self.config.get("accounts", []):
+                account = OutlookAccount.from_config(account_config)
                 if not account.client_id and _default_client_id:
                     account.client_id = _default_client_id
                 if account.validate():
-                    if not account.has_oauth():
-                        logger.warning(
-                            f"[{account.email}] 跳过：IMAP_NEW 仅支持 OAuth2，"
-                            f"请配置 client_id 和 refresh_token"
-                        )
-                    else:
-                        self.accounts.append(account)
+                    self.accounts.append(account)
 
         if not self.accounts:
-            logger.warning("未配置有效的 Outlook 账户（需要 client_id + refresh_token）")
+            logger.warning("未配置有效的 Outlook 账户")
 
-        # 健康检查器
+        # 健康检查器和故障切换管理器
         self.health_checker = HealthChecker(
             failure_threshold=self.provider_config.health_failure_threshold,
             disable_duration=self.provider_config.health_disable_duration,
+        )
+        self.failover_manager = FailoverManager(
+            health_checker=self.health_checker,
+            priority_order=self.provider_priority,
         )
 
         # 邮件解析器
         self.email_parser = get_email_parser()
 
-        # Provider 实例缓存: email -> IMAPNewProvider
-        self._providers: Dict[str, IMAPNewProvider] = {}
+        # 提供者实例缓存: (email, provider_type) -> OutlookProvider
+        self._providers: Dict[tuple, OutlookProvider] = {}
         self._provider_lock = threading.Lock()
 
-        # IMAP 并发限制（最多 5 个并发）
+        # IMAP 连接限制（防止限流）
         self._imap_semaphore = threading.Semaphore(5)
 
-        # 邮件缓存
-        self._email_cache = _EmailCache()
-
-        # 验证码去重
+        # 验证码去重机制
         self._used_codes: Dict[str, set] = {}
 
-    def _get_provider(self, account: OutlookAccount) -> IMAPNewProvider:
-        key = account.email.lower()
-        with self._provider_lock:
-            if key not in self._providers:
-                self._providers[key] = IMAPNewProvider(account, self.provider_config)
-            return self._providers[key]
-
-    def _fetch_emails(
+    def _get_provider(
         self,
         account: OutlookAccount,
-        count: int = 15,
+        provider_type: ProviderType,
+    ) -> OutlookProvider:
+        """
+        获取或创建提供者实例
+
+        Args:
+            account: Outlook 账户
+            provider_type: 提供者类型
+
+        Returns:
+            提供者实例
+        """
+        cache_key = (account.email.lower(), provider_type)
+
+        with self._provider_lock:
+            if cache_key not in self._providers:
+                provider = self._create_provider(account, provider_type)
+                self._providers[cache_key] = provider
+
+            return self._providers[cache_key]
+
+    def _create_provider(
+        self,
+        account: OutlookAccount,
+        provider_type: ProviderType,
+    ) -> OutlookProvider:
+        """
+        创建提供者实例
+
+        Args:
+            account: Outlook 账户
+            provider_type: 提供者类型
+
+        Returns:
+            提供者实例
+        """
+        if provider_type == ProviderType.IMAP_OLD:
+            return IMAPOldProvider(account, self.provider_config)
+        elif provider_type == ProviderType.IMAP_NEW:
+            return IMAPNewProvider(account, self.provider_config)
+        elif provider_type == ProviderType.GRAPH_API:
+            return GraphAPIProvider(account, self.provider_config)
+        else:
+            raise ValueError(f"未知的提供者类型: {provider_type}")
+
+    def _get_provider_priority_for_account(self, account: OutlookAccount) -> List[ProviderType]:
+        """根据账户是否有 OAuth，返回适合的提供者优先级列表"""
+        if account.has_oauth():
+            return self.provider_priority
+        else:
+            # 无 OAuth，直接走旧版 IMAP（密码认证），跳过需要 OAuth 的提供者
+            return [ProviderType.IMAP_OLD]
+
+    def _try_providers_for_emails(
+        self,
+        account: OutlookAccount,
+        count: int = 20,
         only_unseen: bool = True,
-        since_minutes: Optional[int] = None,
-        use_cache: bool = False,
-        folders: Optional[List[str]] = None,
     ) -> List[EmailMessage]:
-        """通过 IMAP_NEW Provider 获取邮件，可选使用内存缓存"""
-        if use_cache:
-            cached = self._email_cache.get(account.email)
-            if cached is not None:
-                return cached
+        """
+        尝试多个提供者获取邮件
 
-        if not self.health_checker.is_available():
-            logger.debug(f"[{account.email}] IMAP_NEW 不可用，跳过")
-            return []
+        Args:
+            account: Outlook 账户
+            count: 获取数量
+            only_unseen: 是否只获取未读
 
-        try:
-            provider = self._get_provider(account)
-            with self._imap_semaphore:
-                with provider:
-                    emails = provider.get_recent_emails(
-                        count, only_unseen, since_minutes=since_minutes, folders=folders
-                    )
+        Returns:
+            邮件列表
+        """
+        errors = []
 
-            if emails:
-                self.health_checker.record_success()
-                if use_cache:
-                    self._email_cache.set(account.email, emails)
-            return emails
+        # 根据账户类型选择合适的提供者优先级
+        priority = self._get_provider_priority_for_account(account)
 
-        except Exception as e:
-            err = str(e)
-            self.health_checker.record_failure(err)
-            logger.warning(f"[{account.email}] 获取邮件失败: {e}")
-            return []
+        # 按优先级尝试各提供者
+        for provider_type in priority:
+            # 检查提供者是否可用
+            if not self.health_checker.is_available(provider_type):
+                logger.debug(
+                    f"[{account.email}] {provider_type.value} 不可用，跳过"
+                )
+                continue
+
+            try:
+                provider = self._get_provider(account, provider_type)
+
+                with self._imap_semaphore:
+                    with provider:
+                        emails = provider.get_recent_emails(count, only_unseen)
+
+                        if emails:
+                            # 成功获取邮件
+                            self.health_checker.record_success(provider_type)
+                            logger.debug(
+                                f"[{account.email}] {provider_type.value} 获取到 {len(emails)} 封邮件"
+                            )
+                            return emails
+
+            except Exception as e:
+                error_msg = str(e)
+                errors.append(f"{provider_type.value}: {error_msg}")
+                self.health_checker.record_failure(provider_type, error_msg)
+                logger.warning(
+                    f"[{account.email}] {provider_type.value} 获取邮件失败: {e}"
+                )
+
+        logger.error(
+            f"[{account.email}] 所有提供者都失败: {'; '.join(errors)}"
+        )
+        return []
 
     def create_email(self, config: Dict[str, Any] = None) -> Dict[str, Any]:
-        """轮询选择可用的 Outlook 账户"""
+        """
+        选择可用的 Outlook 账户
+
+        Args:
+            config: 配置参数（未使用）
+
+        Returns:
+            包含邮箱信息的字典
+        """
         if not self.accounts:
             self.update_status(False, EmailServiceError("没有可用的 Outlook 账户"))
             raise EmailServiceError("没有可用的 Outlook 账户")
 
+        # 轮询选择账户
         with self._account_lock:
             account = self.accounts[self._current_account_index]
             self._current_account_index = (self._current_account_index + 1) % len(self.accounts)
 
-        logger.info(f"选择 Outlook 账户: {account.email}")
-        self.update_status(True)
-        return {
+        email_info = {
             "email": account.email,
             "service_id": account.email,
-            "account": {"email": account.email, "has_oauth": account.has_oauth()},
+            "account": {
+                "email": account.email,
+                "has_oauth": account.has_oauth()
+            }
         }
+
+        logger.info(f"选择 Outlook 账户: {account.email}")
+        self.update_status(True)
+        return email_info
 
     def get_verification_code(
         self,
@@ -218,185 +299,114 @@ class OutlookService(BaseEmailService):
         pattern: str = None,
         otp_sent_at: Optional[float] = None,
     ) -> Optional[str]:
-        """从 Outlook 邮箱获取验证码"""
-        account = next(
-            (a for a in self.accounts if a.email.lower() == email.lower()), None
-        )
+        """
+        从 Outlook 邮箱获取验证码
+
+        Args:
+            email: 邮箱地址
+            email_id: 未使用
+            timeout: 超时时间（秒）
+            pattern: 验证码正则表达式（未使用）
+            otp_sent_at: OTP 发送时间戳
+
+        Returns:
+            验证码字符串
+        """
+        # 查找对应的账户
+        account = None
+        for acc in self.accounts:
+            if acc.email.lower() == email.lower():
+                account = acc
+                break
+
         if not account:
-            self.update_status(False, EmailServiceError(f"未找到邮箱账户: {email}"))
+            self.update_status(False, EmailServiceError(f"未找到邮箱对应的账户: {email}"))
             return None
 
-        code_settings = _get_code_settings()
+        # 获取验证码等待配置
+        code_settings = get_email_code_settings()
         actual_timeout = timeout or code_settings["timeout"]
         poll_interval = code_settings["poll_interval"]
 
-        logger.info(f"[{email}] 开始获取验证码，超时 {actual_timeout}s")
+        logger.info(
+            f"[{email}] 开始获取验证码，超时 {actual_timeout}s，"
+            f"提供者优先级: {[p.value for p in self.provider_priority]}"
+        )
 
+        # 初始化验证码去重集合
         if email not in self._used_codes:
             self._used_codes[email] = set()
         used_codes = self._used_codes[email]
 
+        # 计算最小时间戳（留出 60 秒时钟偏差）
         min_timestamp = (otp_sent_at - 60) if otp_sent_at else 0
 
-        use_idle = True
-        try:
-            use_idle = get_settings().outlook_use_idle
-        except Exception:
-            pass
-
-        if use_idle:
-            code = self._wait_with_idle(
-                account, email, actual_timeout, min_timestamp, used_codes, otp_sent_at
-            )
-        else:
-            code = self._wait_with_poll(
-                account, email, actual_timeout, poll_interval, min_timestamp, used_codes, otp_sent_at
-            )
-
-        if code:
-            used_codes.add(code)
-            self.update_status(True)
-            return code
-        return None
-
-    def _wait_with_poll(
-        self,
-        account: OutlookAccount,
-        email: str,
-        timeout: int,
-        poll_interval: int,
-        min_timestamp: float,
-        used_codes: set,
-        otp_sent_at: Optional[float] = None,
-    ) -> Optional[str]:
-        """轮询方式等待验证码"""
         start_time = time.time()
         poll_count = 0
 
-        while time.time() - start_time < timeout:
+        while time.time() - start_time < actual_timeout:
             poll_count += 1
-            # 每次动态计算 since_minutes，确保时间窗口随轮询推进而更新
-            if otp_sent_at:
-                elapsed_since_send = int((time.time() - otp_sent_at) / 60) + 2
-                since_minutes: Optional[int] = min(elapsed_since_send, 180)
-                only_unseen = False
-            else:
-                since_minutes = None
-                only_unseen = poll_count <= 3
+
+            # 渐进式邮件检查：前 3 次只检查未读
+            only_unseen = poll_count <= 3
+
             try:
-                emails = self._fetch_emails(
-                    account, count=15, only_unseen=only_unseen,
-                    since_minutes=since_minutes,
-                    folders=_OUTLOOK_SEARCH_FOLDERS,
+                # 尝试多个提供者获取邮件
+                emails = self._try_providers_for_emails(
+                    account,
+                    count=15,
+                    only_unseen=only_unseen,
                 )
+
                 if emails:
+                    logger.debug(
+                        f"[{email}] 第 {poll_count} 次轮询获取到 {len(emails)} 封邮件"
+                    )
+
+                    # 从邮件中查找验证码
                     code = self.email_parser.find_verification_code_in_emails(
                         emails,
                         target_email=email,
                         min_timestamp=min_timestamp,
                         used_codes=used_codes,
                     )
+
                     if code:
+                        used_codes.add(code)
                         elapsed = int(time.time() - start_time)
                         logger.info(
-                            f"[{email}] 找到验证码: {code}，耗时 {elapsed}s，轮询 {poll_count} 次"
+                            f"[{email}] 找到验证码: {code}，"
+                            f"总耗时 {elapsed}s，轮询 {poll_count} 次"
                         )
+                        self.update_status(True)
                         return code
-            except Exception as e:
-                logger.warning(f"[{email}] 轮询出错: {e}")
 
+            except Exception as e:
+                logger.warning(f"[{email}] 检查出错: {e}")
+
+            # 等待下次轮询
             time.sleep(poll_interval)
 
-        logger.warning(f"[{email}] 验证码超时 ({timeout}s)，共轮询 {poll_count} 次")
+        elapsed = int(time.time() - start_time)
+        logger.warning(f"[{email}] 验证码超时 ({actual_timeout}s)，共轮询 {poll_count} 次")
         return None
 
-    def _wait_with_idle(
-        self,
-        account: OutlookAccount,
-        email: str,
-        timeout: int,
-        min_timestamp: float,
-        used_codes: set,
-        otp_sent_at: Optional[float] = None,
-    ) -> Optional[str]:
-        """IMAP IDLE 方式等待验证码，失败时自动降级为轮询"""
-        if not self.health_checker.is_available():
-            logger.warning(f"[{email}] IMAP_NEW 不可用，降级为轮询")
-            return self._wait_with_poll(
-                account, email, timeout, 3, min_timestamp, used_codes, otp_sent_at
-            )
+    def list_emails(self, **kwargs) -> List[Dict[str, Any]]:
+        """列出所有可用的 Outlook 账户"""
+        return [
+            {
+                "email": account.email,
+                "id": account.email,
+                "has_oauth": account.has_oauth(),
+                "type": "outlook"
+            }
+            for account in self.accounts
+        ]
 
-        # 计算 since_minutes：从发送时间前2分钟开始，最多180分钟
-        since_minutes: Optional[int] = None
-        if otp_sent_at:
-            elapsed_since_send = int((time.time() - otp_sent_at) / 60) + 2
-            since_minutes = min(elapsed_since_send, 180)
-
-        start_time = time.time()
-        try:
-            provider = self._get_provider(account)
-            with self._imap_semaphore:
-                with provider:
-                    # 先做一次即时检查
-                    emails = provider.get_recent_emails(
-                        15, only_unseen=(since_minutes is None), since_minutes=since_minutes,
-                        folders=_OUTLOOK_SEARCH_FOLDERS,
-                    )
-                    code = self.email_parser.find_verification_code_in_emails(
-                        emails,
-                        target_email=email,
-                        min_timestamp=min_timestamp,
-                        used_codes=used_codes,
-                    )
-                    if code:
-                        elapsed = int(time.time() - start_time)
-                        logger.info(f"[{email}] 找到验证码: {code}，耗时 {elapsed}s（即时检查）")
-                        return code
-
-                    # IDLE 等待循环
-                    while time.time() - start_time < timeout:
-                        remaining = int(timeout - (time.time() - start_time))
-                        if remaining <= 0:
-                            break
-                        arrived = provider.wait_for_new_email_idle(timeout=min(remaining, 25))
-                        # 无效化缓存，强制重新拉取
-                        self._email_cache.invalidate(email)
-                        # IDLE 触发后用 since_minutes 搜索，覆盖已读邮件
-                        fetch_since = since_minutes
-                        if fetch_since is None:
-                            # 没有 otp_sent_at 时，用距当前时间2分钟内的邮件
-                            fetch_since = 2
-                        emails = provider.get_recent_emails(
-                            15, only_unseen=False, since_minutes=fetch_since,
-                            folders=_OUTLOOK_SEARCH_FOLDERS,
-                        )
-                        code = self.email_parser.find_verification_code_in_emails(
-                            emails,
-                            target_email=email,
-                            min_timestamp=min_timestamp,
-                            used_codes=used_codes,
-                        )
-                        if code:
-                            elapsed = int(time.time() - start_time)
-                            logger.info(
-                                f"[{email}] 找到验证码: {code}，耗时 {elapsed}s"
-                                f"（IDLE {'推送' if arrived else '超时检查'}）"
-                            )
-                            return code
-
-        except Exception as e:
-            logger.warning(f"[{email}] IDLE 失败，降级为轮询: {e}")
-            elapsed = int(time.time() - start_time)
-            remaining = max(0, timeout - elapsed)
-            if remaining > 0:
-                code_settings = _get_code_settings()
-                return self._wait_with_poll(
-                    account, email, remaining,
-                    code_settings["poll_interval"], min_timestamp, used_codes, otp_sent_at
-                )
-
-        logger.warning(f"[{email}] IDLE 等待验证码超时 ({timeout}s)")
-        return None
+    def delete_email(self, email_id: str) -> bool:
+        """删除邮箱（Outlook 不支持删除账户）"""
+        logger.warning(f"Outlook 服务不支持删除账户: {email_id}")
+        return False
 
     def check_health(self) -> bool:
         """检查 Outlook 服务是否可用"""
@@ -404,48 +414,48 @@ class OutlookService(BaseEmailService):
             self.update_status(False, EmailServiceError("没有配置的账户"))
             return False
 
-        try:
-            provider = self._get_provider(self.accounts[0])
-            if provider.test_connection():
-                self.update_status(True)
-                return True
-        except Exception as e:
-            logger.warning(f"Outlook 健康检查失败: {e}")
+        # 测试第一个账户的连接
+        test_account = self.accounts[0]
+
+        # 尝试任一提供者连接
+        for provider_type in self.provider_priority:
+            try:
+                provider = self._get_provider(test_account, provider_type)
+                if provider.test_connection():
+                    self.update_status(True)
+                    return True
+            except Exception as e:
+                logger.warning(
+                    f"Outlook 健康检查失败 ({test_account.email}, {provider_type.value}): {e}"
+                )
 
         self.update_status(False, EmailServiceError("健康检查失败"))
         return False
 
-    def list_emails(self, **kwargs) -> List[Dict[str, Any]]:
-        return [
-            {
-                "email": a.email,
-                "id": a.email,
-                "has_oauth": a.has_oauth(),
-                "type": "outlook",
-            }
-            for a in self.accounts
-        ]
-
-    def delete_email(self, email_id: str) -> bool:
-        logger.warning(f"Outlook 服务不支持删除账户: {email_id}")
-        return False
+    def get_provider_status(self) -> Dict[str, Any]:
+        """获取提供者状态"""
+        return self.failover_manager.get_status()
 
     def get_account_stats(self) -> Dict[str, Any]:
+        """获取账户统计信息"""
         total = len(self.accounts)
-        oauth_count = sum(1 for a in self.accounts if a.has_oauth())
+        oauth_count = sum(1 for acc in self.accounts if acc.has_oauth())
+
         return {
             "total_accounts": total,
             "oauth_accounts": oauth_count,
             "password_accounts": total - oauth_count,
-            "accounts": [a.to_dict() for a in self.accounts],
-            "health_status": self.health_checker.get_status(),
+            "accounts": [acc.to_dict() for acc in self.accounts],
+            "provider_status": self.get_provider_status(),
         }
 
     def add_account(self, account_config: Dict[str, Any]) -> bool:
+        """添加新的 Outlook 账户"""
         try:
             account = OutlookAccount.from_config(account_config)
             if not account.validate():
                 return False
+
             self.accounts.append(account)
             logger.info(f"添加 Outlook 账户: {account.email}")
             return True
@@ -454,13 +464,24 @@ class OutlookService(BaseEmailService):
             return False
 
     def remove_account(self, email: str) -> bool:
-        for i, a in enumerate(self.accounts):
-            if a.email.lower() == email.lower():
+        """移除 Outlook 账户"""
+        for i, acc in enumerate(self.accounts):
+            if acc.email.lower() == email.lower():
                 self.accounts.pop(i)
                 logger.info(f"移除 Outlook 账户: {email}")
                 return True
         return False
 
-    def reset_health(self):
-        self.health_checker.reset()
-        logger.info("已重置 IMAP_NEW 健康状态")
+    def reset_provider_health(self):
+        """重置所有提供者的健康状态"""
+        self.health_checker.reset_all()
+        logger.info("已重置所有提供者的健康状态")
+
+    def force_provider(self, provider_type: ProviderType):
+        """强制使用指定的提供者"""
+        self.health_checker.force_enable(provider_type)
+        # 禁用其他提供者
+        for pt in ProviderType:
+            if pt != provider_type:
+                self.health_checker.force_disable(pt, 60)
+        logger.info(f"已强制使用提供者: {provider_type.value}")

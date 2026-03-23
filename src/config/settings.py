@@ -76,7 +76,7 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
     ),
     "webui_port": SettingDefinition(
         db_key="webui.port",
-        default_value=8000,
+        default_value=15555,
         category=SettingCategory.WEBUI,
         description="Web UI 监听端口"
     ),
@@ -136,7 +136,7 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
     ),
     "openai_redirect_uri": SettingDefinition(
         db_key="openai.redirect_uri",
-        default_value="http://localhost:15555/auth/callback",
+        default_value="http://localhost:1455/auth/callback",
         category=SettingCategory.OPENAI,
         description="OpenAI OAuth 回调 URI"
     ),
@@ -358,6 +358,12 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
     ),
 
     # Outlook 配置
+    "outlook_provider_priority": SettingDefinition(
+        db_key="outlook.provider_priority",
+        default_value=["imap_old", "imap_new", "graph_api"],
+        category=SettingCategory.EMAIL,
+        description="Outlook 提供者优先级"
+    ),
     "outlook_health_failure_threshold": SettingDefinition(
         db_key="outlook.health_failure_threshold",
         default_value=5,
@@ -375,12 +381,6 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         default_value="24d9a0ed-8787-4584-883c-2fd79308940a",
         category=SettingCategory.EMAIL,
         description="Outlook OAuth 默认 Client ID"
-    ),
-    "outlook_use_idle": SettingDefinition(
-        db_key="outlook.use_idle",
-        default_value=True,
-        category=SettingCategory.EMAIL,
-        description="使用 IMAP IDLE 替代轮询获取验证码（降低延迟，默认开启）"
     ),
 }
 
@@ -407,9 +407,9 @@ SETTING_TYPES: Dict[str, Type] = {
     "cpa_enabled": bool,
     "email_code_timeout": int,
     "email_code_poll_interval": int,
+    "outlook_provider_priority": list,
     "outlook_health_failure_threshold": int,
     "outlook_health_disable_duration": int,
-    "outlook_use_idle": bool,
 }
 
 # 需要作为 SecretStr 处理的字段
@@ -609,7 +609,7 @@ class Settings(BaseModel):
 
     # Web UI 配置
     webui_host: str = "0.0.0.0"
-    webui_port: int = 8000
+    webui_port: int = 15555
     webui_secret_key: SecretStr = SecretStr("your-secret-key-change-in-production")
     webui_access_password: SecretStr = SecretStr("admin123")
 
@@ -622,7 +622,7 @@ class Settings(BaseModel):
     openai_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
     openai_auth_url: str = "https://auth.openai.com/oauth/authorize"
     openai_token_url: str = "https://auth.openai.com/oauth/token"
-    openai_redirect_uri: str = "http://localhost:15555/auth/callback"
+    openai_redirect_uri: str = "http://localhost:1455/auth/callback"
     openai_scope: str = "openid email profile offline_access"
 
     # 代理配置
@@ -694,10 +694,10 @@ class Settings(BaseModel):
     email_code_poll_interval: int = 3
 
     # Outlook 配置
+    outlook_provider_priority: List[str] = ["imap_old", "imap_new", "graph_api"]
     outlook_health_failure_threshold: int = 5
     outlook_health_disable_duration: int = 60
     outlook_default_client_id: str = "24d9a0ed-8787-4584-883c-2fd79308940a"
-    outlook_use_idle: bool = True
 
 
 # 全局配置实例

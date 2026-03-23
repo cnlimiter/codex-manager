@@ -19,6 +19,14 @@ class EmailServiceError(Exception):
     pass
 
 
+class RateLimitedEmailServiceError(EmailServiceError):
+    """邮箱服务被限流"""
+
+    def __init__(self, message: str, retry_after: Optional[int] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class EmailServiceStatus(Enum):
     """邮箱服务状态"""
     HEALTHY = "healthy"
@@ -283,7 +291,10 @@ class BaseEmailService(abc.ABC):
             self._status = EmailServiceStatus.HEALTHY
             self._last_error = None
         else:
-            self._status = EmailServiceStatus.DEGRADED
+            if isinstance(error, RateLimitedEmailServiceError):
+                self._status = EmailServiceStatus.UNAVAILABLE
+            else:
+                self._status = EmailServiceStatus.DEGRADED
             if error:
                 self._last_error = str(error)
 

@@ -12,7 +12,6 @@ from .http_client import (
     create_openai_client,
 )
 from .register import RegistrationEngine, RegistrationResult
-from .login import LoginEngine
 from .utils import setup_logging, get_data_dir
 
 __all__ = [
@@ -28,7 +27,6 @@ __all__ = [
     'create_openai_client',
     'RegistrationEngine',
     'RegistrationResult',
-    'LoginEngine',
     'setup_logging',
     'get_data_dir',
 ]

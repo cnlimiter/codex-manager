@@ -72,25 +72,6 @@ const elements = {
     editOutlookForm: document.getElementById('edit-outlook-form'),
     closeEditOutlookModal: document.getElementById('close-edit-outlook-modal'),
     cancelEditOutlook: document.getElementById('cancel-edit-outlook'),
-
-    // 收件箱模态框
-    inboxModal: document.getElementById('inbox-modal'),
-    closeInboxModal: document.getElementById('close-inbox-modal'),
-    inboxRefreshBtn: document.getElementById('inbox-refresh-btn'),
-    inboxOnlyUnseen: document.getElementById('inbox-only-unseen'),
-    inboxLoading: document.getElementById('inbox-loading'),
-    inboxTable: document.getElementById('inbox-table'),
-    inboxTbody: document.getElementById('inbox-tbody'),
-    inboxEmpty: document.getElementById('inbox-empty'),
-    inboxModalEmail: document.getElementById('inbox-modal-email'),
-
-    // 邮件正文模态框
-    emailDetailModal: document.getElementById('email-detail-modal'),
-    closeEmailDetailModal: document.getElementById('close-email-detail-modal'),
-    emailDetailSubject: document.getElementById('email-detail-subject'),
-    emailDetailSender: document.getElementById('email-detail-sender'),
-    emailDetailDate: document.getElementById('email-detail-date'),
-    emailDetailBody: document.getElementById('email-detail-body'),
 };
 
 const CUSTOM_SUBTYPE_LABELS = {
@@ -183,12 +164,6 @@ function initEventListeners() {
     document.addEventListener('click', () => {
         document.querySelectorAll('.dropdown-menu.active').forEach(m => m.classList.remove('active'));
     });
-
-    // 收件箱模态框事件
-    elements.closeInboxModal.addEventListener('click', () => elements.inboxModal.classList.remove('active'));
-    elements.closeEmailDetailModal.addEventListener('click', () => elements.emailDetailModal.classList.remove('active'));
-    elements.inboxRefreshBtn.addEventListener('click', () => loadInbox(currentInboxServiceId, true));
-    elements.inboxOnlyUnseen.addEventListener('change', () => loadInbox(currentInboxServiceId));
 }
 
 function toggleEmailMoreMenu(btn) {
@@ -272,7 +247,6 @@ async function loadOutlookServices() {
                 <td>${format.date(service.last_used)}</td>
                 <td>
                     <div style="display:flex;gap:4px;align-items:center;white-space:nowrap;">
-                        <button class="btn btn-secondary btn-sm" onclick="openInboxModal(${service.id}, '${escapeHtml(service.config?.email || service.name)}')">收件箱</button>
                         <button class="btn btn-secondary btn-sm" onclick="editOutlookService(${service.id})">编辑</button>
                         <div class="dropdown" style="position:relative;">
                             <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();toggleEmailMoreMenu(this)">更多</button>
@@ -812,58 +786,4 @@ async function handleEditOutlook(e) {
     } catch (error) {
         toast.error('更新失败: ' + error.message);
     }
-}
-
-// ============== 收件箱 ==============
-
-let currentInboxServiceId = null;
-
-async function openInboxModal(serviceId, email) {
-    currentInboxServiceId = serviceId;
-    elements.inboxModalEmail.textContent = email;
-    elements.inboxOnlyUnseen.checked = false;
-    elements.inboxModal.classList.add('active');
-    await loadInbox(serviceId);
-}
-
-async function loadInbox(serviceId) {
-    if (!serviceId) return;
-    const onlyUnseen = elements.inboxOnlyUnseen.checked;
-    elements.inboxLoading.style.display = 'block';
-    elements.inboxTable.style.display = 'none';
-    elements.inboxEmpty.style.display = 'none';
-    elements.inboxEmpty.textContent = '暂无邮件';
-    try {
-        const params = new URLSearchParams({ count: 50, only_unseen: onlyUnseen });
-        const data = await api.get(`/email-services/${serviceId}/inbox?${params}`);
-        const emails = data.emails || [];
-        elements.inboxLoading.style.display = 'none';
-        if (emails.length === 0) {
-            elements.inboxEmpty.style.display = 'block';
-            return;
-        }
-        elements.inboxTbody.innerHTML = emails.map(m => {
-            const dataAttr = escapeHtml(JSON.stringify(m));
-            return `<tr style="cursor:pointer;" onclick="showEmailDetail(JSON.parse(this.dataset.mail))" data-mail="${dataAttr}">
-                <td style="text-align:center;">${m.is_read ? '' : '<span style="color:var(--primary);font-size:10px;">●</span>'}</td>
-                <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(m.subject)}">${escapeHtml(m.subject) || '(无主题)'}</td>
-                <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(m.sender)}">${escapeHtml(m.sender)}</td>
-                <td>${format.date(m.received_at)}</td>
-            </tr>`;
-        }).join('');
-        elements.inboxTable.style.display = 'table';
-    } catch (e) {
-        elements.inboxLoading.style.display = 'none';
-        elements.inboxEmpty.style.display = 'block';
-        elements.inboxEmpty.textContent = '加载失败：' + (e.message || '未知错误');
-        console.error('加载收件箱失败:', e);
-    }
-}
-
-function showEmailDetail(mail) {
-    elements.emailDetailSubject.textContent = mail.subject || '(无主题)';
-    elements.emailDetailSender.textContent = mail.sender || '';
-    elements.emailDetailDate.textContent = format.date(mail.received_at);
-    elements.emailDetailBody.textContent = mail.body || mail.body_preview || '(无正文)';
-    elements.emailDetailModal.classList.add('active');
 }

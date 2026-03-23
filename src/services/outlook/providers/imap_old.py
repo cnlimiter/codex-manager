@@ -1,6 +1,6 @@
 """
-新版 IMAP 提供者
-使用 outlook.live.com 服务器和 login.microsoftonline.com/consumers Token 端点
+旧版 IMAP 提供者
+使用 outlook.office365.com 服务器和 login.live.com Token 端点
 """
 
 import email
@@ -14,26 +14,24 @@ from ..base import ProviderType, EmailMessage
 from ..account import OutlookAccount
 from ..token_manager import TokenManager
 from .base import OutlookProvider, ProviderConfig
-from .imap_old import IMAPOldProvider
 
 
 logger = logging.getLogger(__name__)
 
 
-class IMAPNewProvider(OutlookProvider):
+class IMAPOldProvider(OutlookProvider):
     """
-    新版 IMAP 提供者
-    使用 outlook.live.com:993 和 login.microsoftonline.com/consumers Token 端点
-    需要 IMAP.AccessAsUser.All scope
+    旧版 IMAP 提供者
+    使用 outlook.office365.com:993 和 login.live.com Token 端点
     """
 
     # IMAP 服务器配置
-    IMAP_HOST = "outlook.live.com"
+    IMAP_HOST = "outlook.office365.com"
     IMAP_PORT = 993
 
     @property
     def provider_type(self) -> ProviderType:
-        return ProviderType.IMAP_NEW
+        return ProviderType.IMAP_OLD
 
     def __init__(
         self,
@@ -48,13 +46,6 @@ class IMAPNewProvider(OutlookProvider):
         # Token 管理器
         self._token_manager: Optional[TokenManager] = None
 
-        # 注意：新版 IMAP 必须使用 OAuth2
-        if not account.has_oauth():
-            logger.warning(
-                f"[{self.account.email}] 新版 IMAP 提供者需要 OAuth2 配置 "
-                f"(client_id + refresh_token)"
-            )
-
     def connect(self) -> bool:
         """
         连接到 IMAP 服务器
@@ -63,16 +54,12 @@ class IMAPNewProvider(OutlookProvider):
             是否连接成功
         """
         if self._connected and self._conn:
+            # 检查现有连接
             try:
                 self._conn.noop()
                 return True
             except Exception:
                 self.disconnect()
-
-        # 新版 IMAP 必须使用 OAuth2，无 OAuth 时静默跳过，不记录健康失败
-        if not self.account.has_oauth():
-            logger.debug(f"[{self.account.email}] 跳过 IMAP_NEW（无 OAuth）")
-            return False
 
         try:
             logger.debug(f"[{self.account.email}] 正在连接 IMAP ({self.IMAP_HOST})...")
@@ -84,19 +71,30 @@ class IMAPNewProvider(OutlookProvider):
                 timeout=self.config.timeout,
             )
 
-            # XOAUTH2 认证
-            if self._authenticate_xoauth2():
+            # 尝试 XOAUTH2 认证
+            if self.account.has_oauth():
+                if self._authenticate_xoauth2():
+                    self._connected = True
+                    self.record_success()
+                    logger.info(f"[{self.account.email}] IMAP 连接成功 (XOAUTH2)")
+                    return True
+                else:
+                    logger.warning(f"[{self.account.email}] XOAUTH2 认证失败，尝试密码认证")
+
+            # 密码认证
+            if self.account.password:
+                self._conn.login(self.account.email, self.account.password)
                 self._connected = True
                 self.record_success()
-                logger.info(f"[{self.account.email}] 新版 IMAP 连接成功 (XOAUTH2)")
+                logger.info(f"[{self.account.email}] IMAP 连接成功 (密码认证)")
                 return True
 
-            return False
+            raise ValueError("没有可用的认证方式")
 
         except Exception as e:
             self.disconnect()
             self.record_failure(str(e))
-            logger.error(f"[{self.account.email}] 新版 IMAP 连接失败: {e}")
+            logger.error(f"[{self.account.email}] IMAP 连接失败: {e}")
             return False
 
     def _authenticate_xoauth2(self) -> bool:
@@ -109,7 +107,7 @@ class IMAPNewProvider(OutlookProvider):
         if not self._token_manager:
             self._token_manager = TokenManager(
                 self.account,
-                ProviderType.IMAP_NEW,
+                ProviderType.IMAP_OLD,
                 self.config.proxy_url,
                 self.config.timeout,
             )
@@ -117,7 +115,6 @@ class IMAPNewProvider(OutlookProvider):
         # 获取 Access Token
         token = self._token_manager.get_access_token()
         if not token:
-            logger.error(f"[{self.account.email}] 获取 IMAP Token 失败")
             return False
 
         try:
@@ -126,7 +123,7 @@ class IMAPNewProvider(OutlookProvider):
             self._conn.authenticate("XOAUTH2", lambda _: auth_string.encode("utf-8"))
             return True
         except Exception as e:
-            logger.error(f"[{self.account.email}] XOAUTH2 认证异常: {e}")
+            logger.debug(f"[{self.account.email}] XOAUTH2 认证异常: {e}")
             # 清除缓存的 Token
             self._token_manager.clear_cache()
             return False
@@ -178,7 +175,7 @@ class IMAPNewProvider(OutlookProvider):
 
             # 获取最新的邮件 ID
             ids = data[0].split()
-            recent_ids = ids[-count:][::-1]
+            recent_ids = ids[-count:][::-1]  # 倒序，最新的在前
 
             emails = []
             for msg_id in recent_ids:
@@ -197,11 +194,20 @@ class IMAPNewProvider(OutlookProvider):
             return []
 
     def _fetch_email(self, msg_id: bytes) -> Optional[EmailMessage]:
-        """获取并解析单封邮件"""
+        """
+        获取并解析单封邮件
+
+        Args:
+            msg_id: 邮件 ID
+
+        Returns:
+            EmailMessage 对象，失败返回 None
+        """
         status, data = self._conn.fetch(msg_id, "(RFC822)")
         if status != "OK" or not data or not data[0]:
             return None
 
+        # 获取原始邮件内容
         raw = b""
         for part in data:
             if isinstance(part, tuple) and len(part) > 1:
@@ -215,17 +221,125 @@ class IMAPNewProvider(OutlookProvider):
 
     @staticmethod
     def _parse_email(raw: bytes) -> EmailMessage:
-        """解析原始邮件"""
-        # 使用旧版提供者的解析方法
-        return IMAPOldProvider._parse_email(raw)
+        """
+        解析原始邮件
+
+        Args:
+            raw: 原始邮件数据
+
+        Returns:
+            EmailMessage 对象
+        """
+        # 移除 BOM
+        if raw.startswith(b"\xef\xbb\xbf"):
+            raw = raw[3:]
+
+        msg = email.message_from_bytes(raw)
+
+        # 解析邮件头
+        subject = IMAPOldProvider._decode_header(msg.get("Subject", ""))
+        sender = IMAPOldProvider._decode_header(msg.get("From", ""))
+        to = IMAPOldProvider._decode_header(msg.get("To", ""))
+        delivered_to = IMAPOldProvider._decode_header(msg.get("Delivered-To", ""))
+        x_original_to = IMAPOldProvider._decode_header(msg.get("X-Original-To", ""))
+        date_str = IMAPOldProvider._decode_header(msg.get("Date", ""))
+
+        # 提取正文
+        body = IMAPOldProvider._extract_body(msg)
+
+        # 解析日期
+        received_timestamp = 0
+        received_at = None
+        try:
+            if date_str:
+                received_at = parsedate_to_datetime(date_str)
+                received_timestamp = int(received_at.timestamp())
+        except Exception:
+            pass
+
+        # 构建收件人列表
+        recipients = [r for r in [to, delivered_to, x_original_to] if r]
+
+        return EmailMessage(
+            id=msg.get("Message-ID", ""),
+            subject=subject,
+            sender=sender,
+            recipients=recipients,
+            body=body,
+            received_at=received_at,
+            received_timestamp=received_timestamp,
+            is_read=False,  # 搜索的是未读邮件
+            raw_data=raw[:500] if len(raw) > 500 else raw,
+        )
+
+    @staticmethod
+    def _decode_header(header: str) -> str:
+        """解码邮件头"""
+        if not header:
+            return ""
+
+        parts = []
+        for chunk, encoding in decode_header(header):
+            if isinstance(chunk, bytes):
+                try:
+                    decoded = chunk.decode(encoding or "utf-8", errors="replace")
+                    parts.append(decoded)
+                except Exception:
+                    parts.append(chunk.decode("utf-8", errors="replace"))
+            else:
+                parts.append(str(chunk))
+
+        return "".join(parts).strip()
+
+    @staticmethod
+    def _extract_body(msg) -> str:
+        """提取邮件正文"""
+        import html as html_module
+        import re
+
+        texts = []
+        parts = msg.walk() if msg.is_multipart() else [msg]
+
+        for part in parts:
+            content_type = part.get_content_type()
+            if content_type not in ("text/plain", "text/html"):
+                continue
+
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                text = payload.decode(charset, errors="replace")
+            except LookupError:
+                text = payload.decode("utf-8", errors="replace")
+
+            # 如果是 HTML，移除标签
+            if "<html" in text.lower():
+                text = re.sub(r"<[^>]+>", " ", text)
+
+            texts.append(text)
+
+        # 合并并清理文本
+        combined = " ".join(texts)
+        combined = html_module.unescape(combined)
+        combined = re.sub(r"\s+", " ", combined).strip()
+
+        return combined
 
     def test_connection(self) -> bool:
-        """测试 IMAP 连接"""
+        """
+        测试 IMAP 连接
+
+        Returns:
+            连接是否正常
+        """
         try:
             with self:
                 self._conn.select("INBOX", readonly=True)
                 self._conn.search(None, "ALL")
             return True
         except Exception as e:
-            logger.warning(f"[{self.account.email}] 新版 IMAP 连接测试失败: {e}")
+            logger.warning(f"[{self.account.email}] IMAP 连接测试失败: {e}")
             return False
