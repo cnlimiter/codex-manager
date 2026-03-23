@@ -191,13 +191,14 @@ class TaskManager:
             return _log_queues.get(task_uuid, []).copy()
 
     def update_status(self, task_uuid: str, status: str, **kwargs):
-        """更新任务状态"""
+        """更新任务状态并推送到 WebSocket"""
         if task_uuid not in _task_status:
             _task_status[task_uuid] = {}
 
         _task_status[task_uuid]["status"] = status
         _task_status[task_uuid].update(kwargs)
 
+        # 推送状态变更到 WebSocket（线程安全，兼容同步线程调用）
         if self._loop and self._loop.is_running():
             try:
                 asyncio.run_coroutine_threadsafe(
@@ -205,7 +206,7 @@ class TaskManager:
                     self._loop
                 )
             except Exception as e:
-                logger.warning(f"广播任务状态失败: {e}")
+                logger.warning(f"推送状态到 WebSocket 失败: {e}")
 
     def get_status(self, task_uuid: str) -> Optional[dict]:
         """获取任务状态"""

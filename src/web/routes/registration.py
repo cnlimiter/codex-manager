@@ -15,7 +15,8 @@ from pydantic import BaseModel, Field
 from ...database import crud
 from ...database.session import get_db
 from ...database.models import RegistrationTask, Proxy
-from ...core.register import RegistrationEngine, RegistrationResult
+from ...core.login import LoginEngine
+from ...core.register import RegistrationResult
 from ...services import EmailServiceFactory, EmailServiceType
 from ...config.settings import get_settings
 from ..task_manager import task_manager
@@ -337,6 +338,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
 
                     if selected_service and selected_service.config:
                         config = selected_service.config.copy()
+                        config['service_id'] = selected_service.id
                         crud.update_registration_task(db, task_uuid, email_service_id=selected_service.id)
                         logger.info(f"使用数据库 Outlook 账户: {selected_service.name}")
                     else:
@@ -394,7 +396,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
             # 创建注册引擎 - 使用 TaskManager 的日志回调
             log_callback = task_manager.create_log_callback(task_uuid, prefix=log_prefix, batch_id=batch_id)
 
-            engine = RegistrationEngine(
+            engine = LoginEngine(
                 email_service=email_service,
                 proxy_url=actual_proxy_url,
                 callback_logger=log_callback,

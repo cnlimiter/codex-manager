@@ -21,13 +21,13 @@ jobs:
         include:
           - os: windows-latest
             artifact_name: codex-register.exe
-            asset_name: codex-register-windows-x64.exe
+            asset_name: codex-register-v2-windows-x64.exe
           - os: ubuntu-latest
             artifact_name: codex-register
-            asset_name: codex-register-linux-x64
+            asset_name: codex-register-v2-linux-x64
           - os: macos-latest
             artifact_name: codex-register
-            asset_name: codex-register-macos-arm64
+            asset_name: codex-register-v2-macos-arm64
 
     steps:
       - name: 检出代码
@@ -74,19 +74,19 @@ jobs:
       - name: 整理文件并打包 zip
         run: |
           mkdir -p release
-          # 为每个平台二进制文件打包成 zip
-          find dist/ -type f | while read f; do
-            name=$(basename "$f")
-            # 根据文件名确定平台标识
-            case "$name" in
-              *windows*) platform=$(echo "$name" | sed 's/\.[^.]*$//') ;;
-              *linux*)   platform="$name" ;;
-              *macos*)   platform="$name" ;;
-              *)         platform="$name" ;;
-            esac
+          # download-artifact@v4 将每个 artifact 放在 dist/<asset_name>/ 子目录下
+          # 遍历子目录，用目录名作为平台标识（即 matrix.asset_name）
+          for artifact_dir in dist/*/; do
+            platform=$(basename "$artifact_dir")
+            # 找到该目录下的二进制文件（只有一个）
+            binary=$(find "$artifact_dir" -maxdepth 1 -type f | head -n1)
+            if [ -z "$binary" ]; then
+              echo "警告：$artifact_dir 下没有找到文件，跳过"
+              continue
+            fi
             tmpdir="tmp_${platform}"
             mkdir -p "$tmpdir"
-            cp "$f" "$tmpdir/"
+            cp "$binary" "$tmpdir/"
             cp README.md "$tmpdir/README.md"
             cp .env.example "$tmpdir/.env.example"
             [ -f LICENSE ] && cp LICENSE "$tmpdir/LICENSE" || true
@@ -103,14 +103,14 @@ jobs:
           files: release/*
           generate_release_notes: true
           body: |
-            ## OpenAI 自动注册系统 v2
+            ## OpenAI 账号管理系统 v2
 
             ### 下载说明
             | 平台 | 文件 |
             |------|------|
-            | Windows x64 | `codex-register-windows-x64.exe` |
-            | Linux x64 | `codex-register-linux-x64` |
-            | macOS ARM64 | `codex-register-macos-arm64` |
+            | Windows x64 | `codex-register-v2-windows-x64.exe` |
+            | Linux x64 | `codex-register-v2-linux-x64` |
+            | macOS ARM64 | `codex-register-v2-macos-arm64` |
 
             ### 使用方法
             ```bash

@@ -15,6 +15,7 @@ import base64
 import re
 import uuid
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Union, Callable
 from pathlib import Path
 
@@ -568,3 +569,49 @@ class Timer:
         if self.start_time is not None:
             return time.time() - self.start_time
         return 0.0
+
+class BootstrapExtractor(HTMLParser):
+    """内部解析器，专门提取 id="client-bootstrap" 的 script 内容"""
+    def __init__(self):
+        super().__init__()
+        self._in_target = False
+        self.json_text = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'script':
+            attrs_dict = dict(attrs)
+            if attrs_dict.get('id') == 'client-bootstrap':
+                self._in_target = True
+
+    def handle_endtag(self, tag):
+        if tag == 'script' and self._in_target:
+            self._in_target = False
+
+    def handle_data(self, data):
+        if self._in_target and self.json_text is None:
+            self.json_text = data.strip()
+
+def extract_client_bootstrap_json(html: str):
+    """
+    从 HTML 字符串中提取 id="client-bootstrap" 的 script 标签内容并解析为 JSON。
+    返回 dict 或 None（未找到或解析失败）。
+    """
+    parser = BootstrapExtractor()
+    parser.feed(html)
+    if parser.json_text:
+        try:
+            return json.loads(parser.json_text)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+def base64_payload_decode(payload_b64):
+    import base64
+    import json as json_module
+    padding = 4 - (len(payload_b64) % 4)
+    if padding != 4:
+        payload_b64 += '=' * padding
+
+    # 解码（Base64URL 使用 - 和 _ 替代 + 和 /）
+    payload_bytes = base64.urlsafe_b64decode(payload_b64)
+    return json_module.loads(payload_bytes)

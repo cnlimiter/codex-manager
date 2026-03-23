@@ -2,8 +2,6 @@
 
 管理 OpenAI 账号的 Web UI 系统，支持多种邮箱服务、并发批量注册、代理管理和账号管理。
 
-# 官方拉闸了,改变了授权流程,各位自行研究吧  
-
 > ⚠️ **免责声明**：本工具仅供学习和研究使用，使用本工具产生的一切后果由使用者自行承担。请遵守相关服务的使用条款，不要用于任何违法或不当用途。 如有侵权，请及时联系，会及时删除。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -146,9 +144,9 @@ docker-compose up -d
 
 ```bash
 docker run -d \
-  -p 1455:1455 \
+  -p 15555:15555 \
   -e WEBUI_HOST=0.0.0.0 \
-  -e WEBUI_PORT=1455 \
+  -e WEBUI_PORT=15555 \
   -e WEBUI_ACCESS_PASSWORD=your_secure_password \
   -v $(pwd)/data:/app/data \
   --name codex-register \
@@ -157,7 +155,7 @@ docker run -d \
 
 环境变量说明：
 - `WEBUI_HOST`: 监听的主机地址 (默认 `0.0.0.0`)
-- `WEBUI_PORT`: 监听的端口 (默认 `1455`)
+- `WEBUI_PORT`: 监听的端口 (默认 `15555`)
 - `WEBUI_ACCESS_PASSWORD`: 设置 Web UI 的访问密码
 - `DEBUG`: 设为 `1` 或 `true` 开启调试模式
 - `LOG_LEVEL`: 日志级别，如 `info`, `debug`

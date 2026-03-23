@@ -1028,9 +1028,11 @@ def _build_inbox_config(db, service_type, email: str) -> dict:
         EmailServiceModel.enabled == True
     )
     if service_type == EST.OUTLOOK:
-        # 按 config.email 匹配账号 email
-        services = query.all()
-        svc = next((s for s in services if (s.config or {}).get("email") == email), None)
+        # 按 config.email 精确匹配，不受 enabled 限制（收件箱是账号自己的邮箱）
+        all_outlook = db.query(EmailServiceModel).filter(
+            EmailServiceModel.service_type == db_type
+        ).all()
+        svc = next((s for s in all_outlook if (s.config or {}).get("email", "").lower() == email.lower()), None)
     else:
         svc = query.order_by(EmailServiceModel.priority.asc()).first()
 
