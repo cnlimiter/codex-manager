@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     # WebUI 默认配置
     WEBUI_HOST=0.0.0.0 \
-    WEBUI_PORT=1455 \
+    WEBUI_PORT=15555 \
     LOG_LEVEL=info \
     DEBUG=0
 
@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY . .
 
 # 暴露端口
-EXPOSE 1455
+EXPOSE 15555
 
 # 启动 WebUI
 CMD ["python", "webui.py"]
