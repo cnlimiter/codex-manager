@@ -68,9 +68,10 @@ OPENAI_API_ENDPOINTS = {
     "passwordless_send_otp": "https://auth.openai.com/api/accounts/passwordless/send-otp",
     "validate_otp": "https://auth.openai.com/api/accounts/email-otp/validate",
     "create_account": "https://auth.openai.com/api/accounts/create_account",
-    "add_phone" : "https://auth.openai.com/add-phone",
+    "add_phone": "https://auth.openai.com/add-phone",
     "select_workspace": "https://auth.openai.com/api/accounts/workspace/select",
-    "password_verify" : "https://auth.openai.com/api/accounts/password/verify"
+    "send_passwordless_otp": "https://auth.openai.com/api/accounts/passwordless/send-otp",
+    "password_verify": "https://auth.openai.com/api/accounts/password/verify",
 }
 
 # OpenAI 页面类型（用于判断账号状态）
