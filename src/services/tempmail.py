@@ -6,9 +6,6 @@ import re
 import time
 import logging
 from typing import Optional, Dict, Any, List
-import json
-
-from curl_cffi import requests as cffi_requests
 
 from .base import BaseEmailService, EmailServiceError, EmailServiceType
 from ..core.http_client import HTTPClient, RequestConfig
@@ -58,9 +55,31 @@ class TempmailService(BaseEmailService):
             config=http_config
         )
 
-        # 状态变量
+        # 状态变量（内存缓存，重启后从 DB 按需查询）
         self._email_cache: Dict[str, Dict[str, Any]] = {}
         self._last_check_time: float = 0
+
+    def _save_token_to_db(self, email: str, token: str) -> None:
+        """将邮箱 token 持久化到 Setting 表，key=tempmail_token:{email}"""
+        try:
+            from ..database.session import get_db
+            from ..database.crud import set_setting
+            with get_db() as db:
+                set_setting(db, f"tempmail_token:{email}", token, category="tempmail")
+        except Exception as e:
+            logger.warning(f"保存 Tempmail token 到数据库失败: {e}")
+
+    def _load_token_from_db(self, email: str) -> Optional[str]:
+        """从 Setting 表读取邮箱 token"""
+        try:
+            from ..database.session import get_db
+            from ..database.crud import get_setting
+            with get_db() as db:
+                setting = get_setting(db, f"tempmail_token:{email}")
+                return setting.value if setting else None
+        except Exception as e:
+            logger.warning(f"从数据库读取 Tempmail token 失败: {e}")
+            return None
 
     def create_email(self, config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -107,6 +126,7 @@ class TempmailService(BaseEmailService):
                 "created_at": time.time(),
             }
             self._email_cache[email] = email_info
+            self._save_token_to_db(email, token)
 
             logger.info(f"成功创建 Tempmail.lol 邮箱: {email}")
             self.update_status(True)
@@ -141,12 +161,14 @@ class TempmailService(BaseEmailService):
         """
         token = email_id
         if not token:
-            # 从缓存中查找 token
+            # 先从内存缓存查找，再从数据库查找
             if email in self._email_cache:
                 token = self._email_cache[email].get("token")
-            else:
-                logger.warning(f"未找到邮箱 {email} 的 token，无法获取验证码")
-                return None
+            if not token:
+                token = self._load_token_from_db(email)
+                if not token:
+                    logger.warning(f"未找到邮箱 {email} 的 token，无法获取验证码")
+                    return None
 
         if not token:
             logger.warning(f"邮箱 {email} 没有 token，无法获取验证码")
