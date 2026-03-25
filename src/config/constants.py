@@ -59,6 +59,11 @@ OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OAUTH_REDIRECT_URI = "http://localhost:15555/auth/callback"
 OAUTH_SCOPE = "openid email profile offline_access"
 
+# Codex CLI 专用 OAuth 参数（用于生成 Codex 兼容的 auth.json）
+CODEX_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
+CODEX_OAUTH_SCOPE = "openid profile email offline_access api.connectors.read api.connectors.invoke"
+CODEX_OAUTH_ORIGINATOR = "codex_cli_rs"
+
 # OpenAI API 端点
 OPENAI_API_ENDPOINTS = {
     "sentinel": "https://sentinel.openai.com/backend-api/sentinel/req",

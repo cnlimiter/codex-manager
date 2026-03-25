@@ -104,7 +104,7 @@ def test_registration_task_fails_over_after_rate_limit(monkeypatch):
     attempts = []
 
     class FakeRegistrationEngine:
-        def __init__(self, email_service, proxy_url=None, callback_logger=None, task_uuid=None):
+        def __init__(self, email_service, proxy_url=None, callback_logger=None, status_callback=None, task_uuid=None):
             self.email_service = email_service
             self.phase_history = []
 
@@ -240,7 +240,7 @@ def test_registration_task_enters_deep_cooldown_after_three_otp_timeouts(monkeyp
     current_time = {"value": 1000.0}
 
     class FakeRegistrationEngine:
-        def __init__(self, email_service, proxy_url=None, callback_logger=None, task_uuid=None):
+        def __init__(self, email_service, proxy_url=None, callback_logger=None, status_callback=None, task_uuid=None):
             self.email_service = email_service
             self.phase_history = []
 
@@ -350,7 +350,7 @@ def test_registration_task_success_clears_email_service_backoff(monkeypatch):
         pass
 
     class FakeRegistrationEngine:
-        def __init__(self, email_service, proxy_url=None, callback_logger=None, task_uuid=None):
+        def __init__(self, email_service, proxy_url=None, callback_logger=None, status_callback=None, task_uuid=None):
             self.email_service = email_service
             self.phase_history = [
                 PhaseResult(
@@ -458,7 +458,7 @@ def test_registration_task_backoff_failures_do_not_get_lost_under_concurrency(mo
     peer_started = threading.Event()
 
     class FakeRegistrationEngine:
-        def __init__(self, email_service, proxy_url=None, callback_logger=None, task_uuid=None):
+        def __init__(self, email_service, proxy_url=None, callback_logger=None, status_callback=None, task_uuid=None):
             self.email_service = email_service
             self.phase_history = []
 

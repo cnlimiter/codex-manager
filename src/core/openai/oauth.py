@@ -190,7 +190,8 @@ def generate_oauth_url(
     *,
     redirect_uri: str = OAUTH_REDIRECT_URI,
     scope: str = OAUTH_SCOPE,
-    client_id: str = OAUTH_CLIENT_ID
+    client_id: str = OAUTH_CLIENT_ID,
+    originator: Optional[str] = None
 ) -> OAuthStart:
     """
     生成 OAuth 授权 URL
@@ -199,6 +200,7 @@ def generate_oauth_url(
         redirect_uri: 回调地址
         scope: 权限范围
         client_id: OpenAI Client ID
+        originator: 来源标识（如 codex_cli_rs）
 
     Returns:
         OAuthStart 对象，包含授权 URL 和必要参数
@@ -219,6 +221,8 @@ def generate_oauth_url(
         "id_token_add_organizations": "true",
         "codex_cli_simplified_flow": "true",
     }
+    if originator:
+        params["originator"] = originator
     auth_url = f"{OAUTH_AUTH_URL}?{urllib.parse.urlencode(params)}"
     return OAuthStart(
         auth_url=auth_url,
@@ -321,7 +325,8 @@ class OAuthManager:
         token_url: str = OAUTH_TOKEN_URL,
         redirect_uri: str = OAUTH_REDIRECT_URI,
         scope: str = OAUTH_SCOPE,
-        proxy_url: Optional[str] = None
+        proxy_url: Optional[str] = None,
+        originator: Optional[str] = None
     ):
         self.client_id = client_id
         self.auth_url = auth_url
@@ -329,13 +334,15 @@ class OAuthManager:
         self.redirect_uri = redirect_uri
         self.scope = scope
         self.proxy_url = proxy_url
+        self.originator = originator
 
     def start_oauth(self) -> OAuthStart:
         """开始 OAuth 流程"""
         return generate_oauth_url(
             redirect_uri=self.redirect_uri,
             scope=self.scope,
-            client_id=self.client_id
+            client_id=self.client_id,
+            originator=self.originator
         )
 
     def handle_callback(

@@ -140,7 +140,10 @@
                             </div>
                         </div>
                         <button class="btn btn-danger" id="batch-delete-btn" disabled>
-                            🗑️ 批量删除
+                            删除
+                        </button>
+                        <button class="btn btn-primary" id="codex-auth-login-btn" disabled>
+                            Codex Auth
                         </button>
                         <div class="dropdown">
                             <button class="btn btn-primary" id="export-btn">
@@ -151,6 +154,7 @@
                                 <a href="#" class="dropdown-item" data-format="csv">导出 CSV</a>
                                 <a href="#" class="dropdown-item" data-format="cpa">导出 CPA 格式</a>
                                 <a href="#" class="dropdown-item" data-format="sub2api">导出 Sub2Api 格式</a>
+                                <a href="#" class="dropdown-item" data-format="codex_auth">导出 Codex Auth 格式</a>
                             </div>
                         </div>
                     </div>
@@ -279,6 +283,23 @@
         </div>
     </div>
 
+    <!-- Codex Auth 登录进度弹窗 -->
+    <div class="modal" id="codex-auth-modal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3>Codex Auth 登录</h3>
+                <button class="modal-close" id="close-codex-auth-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="codex-auth-status" style="margin-bottom: 12px; font-weight: 600;"></div>
+                <div id="codex-auth-logs" style="max-height: 300px; overflow-y: auto; background: var(--bg-secondary); border-radius: 6px; padding: 10px; font-size: 0.85rem; font-family: monospace; white-space: pre-wrap; line-height: 1.5;"></div>
+            </div>
+            <div class="modal-footer" style="padding: 12px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn btn-primary" id="codex-auth-download-btn" style="display: none;">下载 auth.json</button>
+                <button class="btn btn-secondary" id="close-codex-auth-modal-btn">关闭</button>
+            </div>
+        </div>
+    </div>
     <!-- NEWAPI 服务选择模态框 -->
     <div class="modal" id="newapi-service-modal">
         <div class="modal-content" style="max-width: 480px;">

@@ -112,6 +112,24 @@ function initEventListeners() {
     // 批量删除
     elements.batchDeleteBtn.addEventListener('click', handleBatchDelete);
 
+    // Codex Auth 登录
+    const codexAuthBtn = document.getElementById('codex-auth-login-btn');
+    if (codexAuthBtn) {
+        codexAuthBtn.addEventListener('click', handleCodexAuthLogin);
+    }
+    const closeCodexAuthModal = document.getElementById('close-codex-auth-modal');
+    if (closeCodexAuthModal) {
+        closeCodexAuthModal.addEventListener('click', () => {
+            document.getElementById('codex-auth-modal').classList.remove('active');
+        });
+    }
+    const closeCodexAuthModalBtn = document.getElementById('close-codex-auth-modal-btn');
+    if (closeCodexAuthModalBtn) {
+        closeCodexAuthModalBtn.addEventListener('click', () => {
+            document.getElementById('codex-auth-modal').classList.remove('active');
+        });
+    }
+
     // 全选（当前页）
     elements.selectAll.addEventListener('change', (e) => {
         const checkboxes = elements.table.querySelectorAll('input[type="checkbox"][data-id]');
@@ -489,7 +507,10 @@ function updateBatchButtons() {
     elements.batchCheckSubBtn.disabled = count === 0;
     elements.exportBtn.disabled = count === 0;
 
-    elements.batchDeleteBtn.textContent = count > 0 ? `🗑️ 删除 (${count})` : '🗑️ 批量删除';
+    const codexAuthBtn = document.getElementById('codex-auth-login-btn');
+    if (codexAuthBtn) codexAuthBtn.disabled = count === 0;
+
+    elements.batchDeleteBtn.textContent = count > 0 ? `删除 (${count})` : '删除';
     elements.batchRefreshBtn.textContent = count > 0 ? `🔄 刷新 (${count})` : '🔄 刷新Token';
     elements.batchValidateBtn.textContent = count > 0 ? `✅ 验证 (${count})` : '✅ 验证Token';
     elements.batchUploadBtn.textContent = count > 0 ? `☁️ 上传 (${count})` : '☁️ 上传';
@@ -732,7 +753,14 @@ async function exportAccounts(format) {
         });
 
         if (!response.ok) {
-            throw new Error(`导出失败: HTTP ${response.status}`);
+            let errorMessage = `HTTP ${response.status}`;
+            try {
+                const errorData = await response.json();
+                errorMessage = errorData.detail || errorData.message || errorMessage;
+            } catch (parseError) {
+                // ignore non-JSON error bodies and fall back to status text
+            }
+            throw new Error(errorMessage);
         }
 
         // 获取文件内容
@@ -740,7 +768,7 @@ async function exportAccounts(format) {
 
         // 从 Content-Disposition 获取文件名
         const disposition = response.headers.get('Content-Disposition');
-        let filename = `accounts_${Date.now()}.${(format === 'cpa' || format === 'sub2api') ? 'json' : format}`;
+        let filename = `accounts_${Date.now()}.${(format === 'cpa' || format === 'sub2api' || format === 'codex_auth') ? 'json' : format}`;
         if (disposition) {
             const match = disposition.match(/filename=(.+)/);
             if (match) {
@@ -1389,4 +1417,189 @@ function showInboxCodeResult(code, email) {
         </div>
     `;
     elements.detailModal.classList.add('active');
+}
+
+// ============== Codex Auth 登录 ==============
+
+let codexAuthResults = [];
+
+async function handleCodexAuthLogin() {
+    const count = getEffectiveCount();
+    if (count === 0) {
+        toast.warning('请先选择要登录的账号');
+        return;
+    }
+
+    const confirmed = await confirm(`将对选中的 ${count} 个账号执行 Codex Auth 登录（需要接收邮箱验证码），确定继续吗？`);
+    if (!confirmed) return;
+
+    const modal = document.getElementById('codex-auth-modal');
+    const logsEl = document.getElementById('codex-auth-logs');
+    const statusEl = document.getElementById('codex-auth-status');
+    const downloadBtn = document.getElementById('codex-auth-download-btn');
+
+    logsEl.textContent = '';
+    statusEl.textContent = '正在启动 Codex Auth 登录...';
+    downloadBtn.style.display = 'none';
+    codexAuthResults = [];
+    modal.classList.add('active');
+
+    if (count === 1 && !selectAllPages) {
+        // 单账号登录
+        const accountId = [...selectedAccounts][0];
+        await codexAuthLoginSingle(accountId, logsEl, statusEl, downloadBtn);
+    } else {
+        // 批量登录
+        await codexAuthLoginBatch(logsEl, statusEl, downloadBtn);
+    }
+}
+
+async function codexAuthLoginSingle(accountId, logsEl, statusEl, downloadBtn) {
+    try {
+        const response = await fetch('/api/accounts/codex-auth-login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ account_id: accountId }),
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            statusEl.textContent = '登录失败: ' + (err.detail || response.statusText);
+            return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.type === 'log') {
+                        logsEl.textContent += data.message + '\n';
+                        logsEl.scrollTop = logsEl.scrollHeight;
+                    } else if (data.type === 'result') {
+                        if (data.success && data.auth_json) {
+                            statusEl.textContent = 'Codex Auth 登录成功!';
+                            codexAuthResults = [{ email: data.email, auth_json: data.auth_json }];
+                            downloadBtn.style.display = 'inline-block';
+                            downloadBtn.onclick = () => downloadCodexAuthResults();
+                            loadAccounts();
+                        } else {
+                            statusEl.textContent = '登录失败: ' + (data.error_message || '未知错误');
+                        }
+                    }
+                } catch (e) { /* ignore parse errors */ }
+            }
+        }
+    } catch (error) {
+        statusEl.textContent = '登录失败: ' + error.message;
+    }
+}
+
+async function codexAuthLoginBatch(logsEl, statusEl, downloadBtn) {
+    try {
+        const payload = buildBatchPayload();
+        const response = await fetch('/api/accounts/codex-auth-login/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            statusEl.textContent = '批量登录失败: ' + (err.detail || response.statusText);
+            return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let successCount = 0;
+        let failCount = 0;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.type === 'log') {
+                        logsEl.textContent += data.message + '\n';
+                        logsEl.scrollTop = logsEl.scrollHeight;
+                    } else if (data.type === 'progress') {
+                        statusEl.textContent = `正在处理 ${data.current}/${data.total}: ${data.email}`;
+                    } else if (data.type === 'account_result') {
+                        if (data.success) {
+                            successCount++;
+                            logsEl.textContent += `[${data.email}] 登录成功\n`;
+                        } else {
+                            failCount++;
+                            logsEl.textContent += `[${data.email}] 登录失败: ${data.error || '未知错误'}\n`;
+                        }
+                        logsEl.scrollTop = logsEl.scrollHeight;
+                    } else if (data.type === 'batch_done') {
+                        codexAuthResults = data.results || [];
+                        statusEl.textContent = `批量登录完成: 成功 ${successCount}, 失败 ${failCount}`;
+                        if (codexAuthResults.length > 0) {
+                            downloadBtn.style.display = 'inline-block';
+                            downloadBtn.onclick = () => downloadCodexAuthResults();
+                        }
+                        loadAccounts();
+                    }
+                } catch (e) { /* ignore parse errors */ }
+            }
+        }
+    } catch (error) {
+        statusEl.textContent = '批量登录失败: ' + error.message;
+    }
+}
+
+function downloadCodexAuthResults() {
+    if (codexAuthResults.length === 0) return;
+
+    if (codexAuthResults.length === 1) {
+        // 单个直接下载 auth.json
+        const item = codexAuthResults[0];
+        const blob = new Blob([JSON.stringify(item.auth_json, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'auth.json';
+        document.body.appendChild(a);
+        a.click();
+        URL.revokeObjectURL(url);
+        a.remove();
+    } else {
+        // 多个：逐个下载（浏览器端无法打 ZIP，逐个下载）
+        codexAuthResults.forEach((item, i) => {
+            setTimeout(() => {
+                const blob = new Blob([JSON.stringify(item.auth_json, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${item.email}_auth.json`;
+                document.body.appendChild(a);
+                a.click();
+                URL.revokeObjectURL(url);
+                a.remove();
+            }, i * 300);
+        });
+    }
+    toast.success(`已下载 ${codexAuthResults.length} 个 auth.json`);
 }

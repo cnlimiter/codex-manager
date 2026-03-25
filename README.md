@@ -48,6 +48,7 @@
     - 单个账号导出为独立 `.json` 文件
     - 多个 CPA 账号打包为 `.zip`，每个账号一个独立文件
     - Sub2API 格式所有账号合并为单个 JSON
+  - Codex Auth 格式需先在账号管理中手动执行 `Codex Auth 登录` 成功后才能导出
   - 上传目标（直连不走代理）：
     - **CPA**：支持多服务配置，上传时选择目标服务，可按服务开关将账号实际代理写入 auth file 的 `proxy_url`
     - **Sub2API**：支持多服务配置，标准 sub2api-data 格式
